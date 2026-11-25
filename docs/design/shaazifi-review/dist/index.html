@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101311">
+  <title>ShaaziFi · Design preview</title>
+  <meta name="description" content="Interactive ShaaziFi network dashboard prototype with sample data.">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="demo-data.js"></script>
+  <script defer src="app.js"></script>
+  <script defer src="screens.js"></script>
+  <script defer src="controls.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <aside class="sidebar" aria-label="Desktop navigation">
+    <button class="brand" data-go="home"><span class="brand-mark" data-icon="brand"></span><span>ShaaziFi</span></button>
+    <nav id="desktop-nav" class="desktop-nav" aria-label="Main"></nav>
+    <div class="sidebar-footer"><span class="dot"></span><div><strong>Demo mode</strong><small>Sample data</small></div></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <button class="router-switch" data-action="switch" aria-label="Switch router">
+          <span class="router-glyph" data-icon="router"></span>
+          <span><strong id="router-name">Home Gateway</strong><small id="router-status">Online · OpenWrt</small></span>
+          <span class="switch-icon" data-icon="chevrons"></span>
+        </button>
+        <div class="header-actions">
+          <span class="demo-label">Demo</span>
+          <button class="icon-button" data-action="theme" aria-label="Switch color theme" title="Switch color theme"><span data-icon="sun"></span></button>
+        </div>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <nav id="mobile-nav" class="mobile-nav" aria-label="Main"></nav>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <noscript>Enable JavaScript to use this interactive preview.</noscript>
+</body>
+</html>

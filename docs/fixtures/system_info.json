@@ -1,0 +1,40 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    0,
+    {
+      "localtime": 1794810686,
+      "uptime": 59220,
+      "load": [
+        2496,
+        1440,
+        0
+      ],
+      "memory": {
+        "total": 452972544,
+        "free": 92733440,
+        "shared": 2973696,
+        "buffered": 0,
+        "available": 93999104,
+        "cached": 45625344
+      },
+      "root": {
+        "total": 182692,
+        "free": 121160,
+        "used": 61532,
+        "avail": 116324
+      },
+      "tmp": {
+        "total": 221176,
+        "free": 215428,
+        "used": 5748,
+        "avail": 215428
+      },
+      "swap": {
+        "total": 225439744,
+        "free": 215052288
+      }
+    }
+  ]
+}

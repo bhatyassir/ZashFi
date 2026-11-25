@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnTangled Android App Mock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: one phone-sized column; native shell screens (find, sign in, reconnect) wrap the router's own UI. */
+:root{
+  --bg:#EEF2F0; --surface:#FFFFFF; --sunk:#E3E9E6; --ink:#13211D; --muted:#5C6B66; --line:#D5DDD9;
+  --accent:#0B7A5E; --accent-ink:#FFFFFF; --accent-soft:#D9EFE7;
+  --warn:#B4690E; --warn-soft:#FBEBD3; --bad:#B3362B; --bad-soft:#F8DEDA;
+  --stage:#D9E0DC;
+  --display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --body:"IBM Plex Sans","Segoe UI",Roboto,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0F1614; --surface:#18221F; --sunk:#111917; --ink:#E6EEEA; --muted:#93A39D; --line:#2A3632;
+    --accent:#3FC79E; --accent-ink:#06231A; --accent-soft:#173A30;
+    --warn:#F0B35A; --warn-soft:#3A2C14; --bad:#F08A7E; --bad-soft:#3D1D19;
+    --stage:#070B0A;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0F1614; --surface:#18221F; --sunk:#111917; --ink:#E6EEEA; --muted:#93A39D; --line:#2A3632;
+  --accent:#3FC79E; --accent-ink:#06231A; --accent-soft:#173A30;
+  --warn:#F0B35A; --warn-soft:#3A2C14; --bad:#F08A7E; --bad-soft:#3D1D19;
+  --stage:#070B0A;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:var(--stage);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.4;display:flex;align-items:center;justify-content:center}
+button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.phone{position:relative;width:100%;height:100%;max-width:400px;max-height:820px;background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
+@media (min-width:480px){.phone{border-radius:34px;border:8px solid var(--ink);height:calc(100% - 32px)}}
+.status{display:flex;justify-content:space-between;padding:8px 20px 4px;font-size:12px;font-weight:500;color:var(--muted);font-variant-numeric:tabular-nums}
+.screen{display:none;flex:1;flex-direction:column;min-height:0}
+.screen.on{display:flex}
+.scroll{flex:1;overflow-y:auto;padding:8px 16px 20px;display:flex;flex-direction:column;gap:14px}
+h1{font-family:var(--display);font-size:26px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+h2{font-family:var(--display);font-size:17px;font-weight:700}
+.sub{color:var(--muted);font-size:13.5px}
+.eyebrow{font-size:11.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.mono{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:14px}
+.row{display:flex;align-items:center;gap:12px}
+.grow{flex:1;min-width:0}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.list>*{display:flex;align-items:center;gap:12px;width:100%;padding:13px 14px;text-align:left;border-bottom:1px solid var(--line)}
+.list>*:last-child{border-bottom:0}
+.ico{width:38px;height:38px;border-radius:11px;background:var(--sunk);display:grid;place-items:center;flex:none}
+.ico svg{width:20px;height:20px;stroke:var(--ink);fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ico.live{background:var(--accent-soft)}.ico.live svg{stroke:var(--accent)}
+.pill{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.off{background:var(--sunk);color:var(--muted)}
+.btn{background:var(--accent);color:var(--accent-ink);font-weight:600;padding:13px 16px;border-radius:13px;width:100%;text-align:center}
+.btn.ghost{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
+.chev{color:var(--muted);font-size:18px}
+input[type=text],input[type=password]{width:100%;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:13px 14px}
+label{font-size:13px;font-weight:500;color:var(--muted);display:block;margin-bottom:6px}
+.sw{width:44px;height:26px;border-radius:99px;background:var(--line);position:relative;flex:none;transition:background .15s}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:var(--surface);transition:transform .15s}
+.sw[aria-checked=true]{background:var(--accent)}
+.sw[aria-checked=true]::after{transform:translateX(18px)}
+.nav{display:none;border-top:1px solid var(--line);background:var(--surface);padding:6px 8px 10px}
+.nav.on{display:flex}
+.nav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11.5px;font-weight:500;color:var(--muted);padding:6px 0;border-radius:10px}
+.nav svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.nav button[aria-current=page]{color:var(--accent)}
+.top{display:flex;align-items:center;gap:10px;padding:6px 16px 4px}
+.top .name{font-family:var(--display);font-weight:700;font-size:16px}
+.note{font-size:12px;color:var(--muted);border:1px dashed var(--line);border-radius:10px;padding:8px 10px}
+/* map */
+.map{display:flex;flex-direction:column;align-items:center;gap:0}
+.node{display:flex;align-items:center;gap:10px;background:var(--sunk);border-radius:12px;padding:9px 12px;width:100%}
+.wire{width:2px;height:14px;background:var(--accent)}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.big{font-family:var(--display);font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.spark{width:100%;height:54px;display:block;margin-top:8px}
+.spark .a{fill:var(--accent-soft)}.spark .l{fill:none;stroke:var(--accent);stroke-width:2}.spark .g{stroke:var(--line);stroke-width:1}.spark circle{fill:var(--accent)}
+/* overlays */
+.sheet-bg{position:absolute;inset:0;background:rgba(0,0,0,.45);display:none;align-items:flex-end;z-index:5}
+.sheet-bg.on{display:flex}
+.sheet{background:var(--bg);width:100%;border-radius:22px 22px 0 0;padding:18px 16px 22px;display:flex;flex-direction:column;gap:12px}
+.cover{position:absolute;inset:0;background:var(--bg);display:none;flex-direction:column;justify-content:center;gap:16px;padding:28px;z-index:6;text-align:center}
+.cover.on{display:flex}
+.ring{width:96px;height:96px;border-radius:50%;border:5px solid var(--accent-soft);border-top-color:var(--accent);margin:0 auto;display:grid;place-items:center;animation:spin 1.2s linear infinite}
+.ring span{animation:spin 1.2s linear infinite reverse;font-family:var(--display);font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.ring,.ring span{animation:none}.sw,.sw::after{transition:none}}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.dot.off{background:var(--line)}
+
+.bars{display:flex;align-items:flex-end;gap:4px;height:64px;margin-top:10px}
+.bars i{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:3px}
+.bars i.b{background:var(--bad)}
+.val{color:var(--muted);text-align:right;max-width:55%;overflow-wrap:anywhere}
+.meter{height:6px;border-radius:99px;background:var(--sunk);overflow:hidden;margin-top:6px}
+.meter i{display:block;height:100%;background:var(--bad)}
+</style>
+</head>
+<body>
+<div class="phone" id="phone">
+  <div class="status"><span>9:00</span><span>Wi-Fi · Home-5G</span></div>
+
+  <!-- 1. Find router (native) -->
+  <section class="screen on" id="s-find">
+    <div class="scroll">
+      <div><div class="eyebrow">Step 1 · App screen</div><h1>Your routers</h1><p class="sub">Found on the Wi-Fi you are connected to.</p></div>
+      <div class="list">
+        <button data-go="login"><span class="ico live"><svg viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 16.5h.01M11 16.5h.01M8 9a6 6 0 0 1 8 0M5.5 6.5a10 10 0 0 1 13 0"/></svg></span>
+          <span class="grow"><b>Home router</b><br><span class="mono">192.168.1.1 · OpenWrt 24.10</span></span><span class="pill">On this Wi-Fi</span></button>
+        <button data-go="login"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 16.5h.01M11 16.5h.01"/></svg></span>
+          <span class="grow"><b>Office router</b><br><span class="mono">10.8.0.1 · via VPN</span></span><span class="pill off">Saved</span></button>
+      </div>
+      <button class="btn ghost" data-go="login">Add a router by address</button>
+      <p class="note">This is a mock. Routers, devices and numbers are examples.</p>
+    </div>
+  </section>
+
+  <!-- 2. Sign in (native) -->
+  <section class="screen" id="s-login">
+    <div class="scroll">
+      <div><div class="eyebrow">Step 2 · App screen</div><h1>Sign in to Home router</h1><p class="sub mono">http://192.168.1.1/untangled/</p></div>
+      <div><label for="pw">Router password</label><input id="pw" type="password" value="examplepass" autocomplete="off"></div>
+      <button class="row card" id="save-sw" style="width:100%;text-align:left" role="switch" aria-checked="true"><span class="grow"><b>Unlock with fingerprint</b><br><span class="sub">Password stays in the phone's secure storage.</span></span><span class="sw" aria-checked="true"></span></button>
+      <button class="btn" data-go="home">Sign in</button>
+      <button class="btn ghost" data-go="find">Back to routers</button>
+      <div class="card row"><span class="pill warn">HTTP</span><span class="grow sub">This router is not using HTTPS. The app only talks to it on your local network.</span></div>
+    </div>
+  </section>
+
+  <!-- 3. Home (router UI) -->
+  <section class="screen" id="s-home">
+    <div class="top"><span class="dot"></span><span class="name grow">Home router</span><button class="pill off" data-go="find">Switch</button></div>
+    <div class="scroll">
+      <div class="card map">
+        <div class="node"><span class="ico live"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></span><span class="grow"><b>Internet</b><br><span class="sub">Connected · 14 ms</span></span><span class="pill">Online</span></div>
+        <div class="wire"></div>
+        <div class="node"><span class="ico live"><svg viewBox="0 0 24 24"><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 16.5h.01M11 16.5h.01M8 9a6 6 0 0 1 8 0"/></svg></span><span class="grow"><b>Home router</b><br><span class="mono">192.168.1.1 · up 12 days</span></span></div>
+        <div class="wire"></div>
+        <button class="node" data-go="devices" style="text-align:left"><span class="ico"><svg viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></svg></span><span class="grow"><b>9 devices</b><br><span class="sub">7 on Wi-Fi · 2 wired · 1 blocked</span></span><span class="chev">›</span></button>
+      </div>
+      <div class="card">
+        <div class="row"><span class="grow"><div class="eyebrow">Download now</div><div class="big">42.6 <span class="sub">Mbps</span></div></span><span style="text-align:right"><div class="eyebrow">Upload</div><div class="big">6.1 <span class="sub">Mbps</span></div></span></div>
+        <svg class="spark" viewBox="0 0 300 54" preserveAspectRatio="none" aria-label="Download speed, last 10 minutes"><path class="g" d="M0 18h300M0 36h300"/><path class="a" d="M0 40 30 34 60 38 90 22 120 26 150 14 180 20 210 30 240 12 270 18 300 10V54H0Z"/><path class="l" d="M0 40 30 34 60 38 90 22 120 26 150 14 180 20 210 30 240 12 270 18 300 10"/><circle cx="297" cy="10" r="3.5"/></svg>
+        <div class="row sub" style="justify-content:space-between;margin-top:4px"><span>10 min ago</span><span>now</span></div>
+      </div>
+      <div class="tiles">
+        <div class="card"><div class="eyebrow">Today</div><div class="big">18.4 <span class="sub">GB</span></div><div class="sub">Smart TV used most</div></div>
+        <button class="card" data-go="adguard" style="text-align:left"><div class="eyebrow">Blocked today</div><div class="big">6,127</div><div class="sub">AdGuard Home &rsaquo;</div></button>
+      </div>
+      <p class="note">From here on, the screens are UnTangled's own interface loaded from the router. Its real layout will differ from this sketch.</p>
+    </div>
+  </section>
+
+  <!-- 4. Devices -->
+  <section class="screen" id="s-devices">
+    <div class="top"><span class="name grow">Devices</span><span class="pill">8 online</span></div>
+    <div class="scroll"><div class="list" id="devlist"></div></div>
+  </section>
+
+  <!-- 5. Wi-Fi -->
+  <section class="screen" id="s-wifi">
+    <div class="top"><span class="name grow">Wi-Fi</span></div>
+    <div class="scroll">
+      <div class="card" style="display:flex;flex-direction:column;gap:12px">
+        <div><label for="ssid">Network name</label><input id="ssid" type="text" value="Home-5G"></div>
+        <div><label for="wpw">Wi-Fi password</label><input id="wpw" type="password" value="examplewifi"></div>
+        <button class="btn" id="apply">Save Wi-Fi settings</button>
+        <p class="sub">Your phone will drop off Wi-Fi for a moment. If you can't reconnect, the router puts the old settings back by itself.</p>
+      </div>
+      <button class="card row" role="switch" aria-checked="false" data-sw style="width:100%;text-align:left"><span class="grow"><b>Guest network</b><br><span class="sub">Internet only, no access to your devices.</span></span><span class="sw" aria-checked="false"></span></button>
+      <button class="card row" role="switch" aria-checked="true" data-sw style="width:100%;text-align:left"><span class="grow"><b>Mesh roaming</b><br><span class="sub">2 access points linked.</span></span><span class="sw" aria-checked="true"></span></button>
+    </div>
+  </section>
+
+  <!-- 6. More -->
+  <section class="screen" id="s-more">
+    <div class="top"><span class="name grow">All features</span><span class="pill off" id="ft-count"></span></div>
+    <div class="scroll" id="morelist"></div>
+  </section>
+
+  <!-- 7. Feature detail (generic) -->
+  <section class="screen" id="s-feature">
+    <div class="top"><button class="pill off" data-go="more">&lsaquo; Back</button><span class="name grow" id="ft-name"></span><span id="ft-pill"></span></div>
+    <div class="scroll">
+      <p class="sub" id="ft-sub"></p>
+      <div class="list" id="ft-rows"></div>
+      <p class="note" id="ft-note"></p>
+    </div>
+  </section>
+
+  <!-- 8. AdGuard Home -->
+  <section class="screen" id="s-adguard">
+    <div class="top"><button class="pill off" data-go="more">&lsaquo; Back</button><span class="name grow">AdGuard Home</span><span class="pill" id="ag-pill">Protecting</span></div>
+    <div class="scroll">
+      <button class="card row" role="switch" aria-checked="true" id="ag-sw" style="width:100%;text-align:left"><span class="grow"><b>Protection</b><br><span class="sub" id="ag-state">Blocking ads, trackers and unsafe sites for every device.</span></span><span class="sw" aria-checked="true"></span></button>
+      <div class="tiles">
+        <div class="card"><div class="eyebrow">DNS queries today</div><div class="big">48,213</div><div class="sub">Average reply 9 ms</div></div>
+        <div class="card"><div class="eyebrow">Blocked</div><div class="big">6,127</div><div class="sub">12.7% of all queries</div></div>
+      </div>
+      <div class="card">
+        <div class="row"><b class="grow">Queries by hour</b><span class="sub">last 12 hours</span></div>
+        <div class="bars" aria-label="Queries per hour, last 12 hours"><i style="height:18%"></i><i style="height:12%"></i><i style="height:10%"></i><i style="height:22%"></i><i style="height:48%"></i><i style="height:66%"></i><i style="height:58%"></i><i style="height:74%"></i><i style="height:100%"></i><i style="height:82%"></i><i style="height:61%"></i><i style="height:70%"></i></div>
+        <div class="row sub" style="justify-content:space-between;margin-top:4px"><span>9 pm</span><span>9 am</span></div>
+      </div>
+      <div class="eyebrow">Most blocked</div>
+      <div class="list">
+        <div><span class="grow"><span class="mono">ads.example.com</span><div class="meter"><i style="width:92%"></i></div></span><span class="val mono">1,902</span></div>
+        <div><span class="grow"><span class="mono">tracker.example.net</span><div class="meter"><i style="width:61%"></i></div></span><span class="val mono">1,266</span></div>
+        <div><span class="grow"><span class="mono">telemetry.example.org</span><div class="meter"><i style="width:38%"></i></div></span><span class="val mono">781</span></div>
+      </div>
+      <div class="eyebrow">Busiest devices</div>
+      <div class="list">
+        <div><span class="grow"><b>Smart TV</b><br><span class="sub">31% blocked</span></span><span class="val mono">14,880</span></div>
+        <div><span class="grow"><b>Pixel 8</b><br><span class="sub">9% blocked</span></span><span class="val mono">11,204</span></div>
+        <div><span class="grow"><b>Kid's tablet</b><br><span class="sub">Safe search on</span></span><span class="val mono">6,530</span></div>
+      </div>
+      <div class="eyebrow">Controls</div>
+      <div class="list">
+        <button role="switch" aria-checked="true" data-sw><span class="grow"><b>Safe browsing</b></span><span class="sw" aria-checked="true"></span></button>
+        <button role="switch" aria-checked="false" data-sw><span class="grow"><b>Parental filter</b></span><span class="sw" aria-checked="false"></span></button>
+        <button role="switch" aria-checked="true" data-sw><span class="grow"><b>Safe search</b></span><span class="sw" aria-checked="true"></span></button>
+        <div><span class="grow"><b>Blocklists</b></span><span class="val">4 lists, updated today</span></div>
+        <div><span class="grow"><b>Custom rules</b></span><span class="val">7 rules</span></div>
+        <div><span class="grow"><b>Query log</b></span><span class="chev">&rsaquo;</span></div>
+      </div>
+      <button class="btn ghost" id="ag-pause">Pause protection for 10 minutes</button>
+      <p class="note">AdGuard Home is a separate program on the router, not part of UnTangled. The app would read it directly and show it here as a built-in screen.</p>
+    </div>
+  </section>
+
+  <nav class="nav" id="nav" aria-label="Main">
+    <button data-go="home"><svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/></svg>Home</button>
+    <button data-go="devices"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="12" height="9" rx="1.5"/><path d="M2 17h14"/><rect x="17" y="9" width="5" height="10" rx="1.2"/></svg>Devices</button>
+    <button data-go="wifi"><svg viewBox="0 0 24 24"><path d="M5 12a10 10 0 0 1 14 0M8 15a6 6 0 0 1 8 0M2 9a14 14 0 0 1 20 0M12 19h.01"/></svg>Wi-Fi</button>
+    <button data-go="more"><svg viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>More</button>
+  </nav>
+
+  <!-- device sheet -->
+  <div class="sheet-bg" id="sheetbg">
+    <div class="sheet" role="dialog" aria-labelledby="sh-name">
+      <div class="row"><span class="grow"><h2 id="sh-name"></h2><span class="mono sub" id="sh-ip"></span></span><button class="pill off" id="sh-close">Close</button></div>
+      <button class="card row" role="switch" id="sh-block" style="width:100%;text-align:left"><span class="grow"><b>Block internet</b><br><span class="sub">Stays on Wi-Fi but can't go online.</span></span><span class="sw"></span></button>
+      <button class="card row" role="switch" aria-checked="true" data-sw style="width:100%;text-align:left"><span class="grow"><b>Always use this IP address</b></span><span class="sw" aria-checked="true"></span></button>
+      <div class="card"><b>Internet schedule</b><p class="sub">Mon to Fri, off from 9:30 pm to 6:30 am</p></div>
+      <button class="btn ghost" id="sh-wake">Wake this device</button>
+    </div>
+  </div>
+
+  <!-- reconnect cover (native) -->
+  <div class="cover" id="cover" role="status">
+    <div class="eyebrow">App screen</div>
+    <div class="ring"><span id="count">60</span></div>
+    <h1 id="cv-title">Reconnecting to Home router</h1>
+    <p class="sub" id="cv-sub">Wi-Fi settings changed. Join the network again and confirm, or the router restores the old settings when the timer ends.</p>
+    <button class="btn" id="keep">I'm connected, keep the changes</button>
+    <button class="btn ghost" id="revert">Undo now</button>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const main=["home","devices","wifi","more"];
+function go(name){
+  $$(".screen").forEach(s=>s.classList.toggle("on",s.id==="s-"+name));
+  const tab=main.includes(name)?name:(name==="feature"||name==="adguard")?"more":null;
+  $("#nav").classList.toggle("on",!!tab);
+  $$("#nav button").forEach(b=>b.dataset.go===tab?b.setAttribute("aria-current","page"):b.removeAttribute("aria-current"));
+  const sc=$("#s-"+name+" .scroll"); if(sc)sc.scrollTop=0;
+}
+document.addEventListener("click",e=>{
+  const g=e.target.closest("[data-go]"); if(g){go(g.dataset.go);return}
+  const s=e.target.closest("[data-sw],#save-sw"); if(s)flip(s);
+});
+function flip(el,force){
+  const on=force!==undefined?force:el.getAttribute("aria-checked")!=="true";
+  el.setAttribute("aria-checked",on); el.querySelector(".sw").setAttribute("aria-checked",on); return on;
+}
+// devices
+const devs=[
+ {n:"Smart TV",ip:"192.168.1.20",how:"Wi-Fi 5 GHz",on:true},
+ {n:"Office laptop",ip:"192.168.1.31",how:"Wired",on:true},
+ {n:"Pixel 8",ip:"192.168.1.42",how:"Wi-Fi 5 GHz",on:true},
+ {n:"Kid's tablet",ip:"192.168.1.57",how:"Wi-Fi 2.4 GHz",on:true,blocked:true},
+ {n:"Printer",ip:"192.168.1.60",how:"Wired",on:true},
+ {n:"Desktop PC",ip:"192.168.1.12",how:"Wired",on:false}
+];
+let cur=null;
+function drawDevs(){
+  $("#devlist").innerHTML=devs.map((d,i)=>`<button data-dev="${i}"><span class="dot ${d.on?"":"off"}"></span><span class="grow"><b>${d.n}</b><br><span class="mono">${d.ip} · ${d.how}</span></span><span class="pill ${d.blocked?"bad":d.on?"":"off"}">${d.blocked?"Blocked":d.on?"Online":"Asleep"}</span></button>`).join("");
+}
+drawDevs();
+$("#devlist").addEventListener("click",e=>{
+  const b=e.target.closest("[data-dev]"); if(!b)return;
+  cur=devs[b.dataset.dev]; $("#sh-name").textContent=cur.n; $("#sh-ip").textContent=cur.ip+" · "+cur.how;
+  flip($("#sh-block"),!!cur.blocked); $("#sh-wake").textContent="Wake this device"; $("#sheetbg").classList.add("on");
+});
+$("#sh-block").addEventListener("click",()=>{cur.blocked=flip($("#sh-block"));drawDevs()});
+$("#sh-wake").addEventListener("click",()=>{$("#sh-wake").textContent="Wake signal sent (mock)"});
+$("#sh-close").addEventListener("click",()=>$("#sheetbg").classList.remove("on"));
+$("#sheetbg").addEventListener("click",e=>{if(e.target.id==="sheetbg")e.target.classList.remove("on")});
+// reconnect
+let t=null;
+function closeCover(){clearInterval(t);$("#cover").classList.remove("on")}
+$("#apply").addEventListener("click",()=>{
+  let n=60; $("#count").textContent=n; $("#cover").classList.add("on");
+  clearInterval(t); t=setInterval(()=>{n--; $("#count").textContent=n; if(n<=0)closeCover()},1000);
+});
+$("#keep").addEventListener("click",closeCover);
+$("#revert").addEventListener("click",closeCover);
+
+// all features
+const U="UnTangled", O="OpenWrt";
+const groups=[
+ ["Internet and network",[
+  {n:"Internet (WAN)",s:"Connected by PPPoE",p:"Online",src:U,r:[["Connection type","PPPoE"],["Public IP","203.0.113.24"],["DNS","AdGuard Home"],["Setup wizard","Run again"]]},
+  {n:"LAN and DHCP",s:"192.168.1.1, 9 leases",src:U,r:[["Router address","192.168.1.1"],["Address pool",".100 to .249"],["Lease time","12 hours"],["Fixed addresses","4 devices"]]},
+  {n:"IPv6",s:"Prefix from provider",p:"On",src:U,r:[["IPv6",true],["Prefix","2001:db8:12::/56"],["Devices get","SLAAC and DHCPv6"]]},
+  {n:"Dual WAN",s:"Fibre, 4G as backup",p:"Standby",src:U,r:[["Primary","Fibre"],["Backup","USB 4G modem"],["Switch over automatically",true],["Last failover","28 Oct, 6 min"]]},
+  {n:"Dynamic DNS",s:"home.example.net",p:"Updated",src:U,r:[["Hostname","home.example.net"],["Last update","2 hours ago"],["Keep updated",true]]},
+  {n:"VLANs",s:"Main, Guest, IoT",src:O,r:[["Main","VLAN 1"],["Guest","VLAN 20"],["IoT","VLAN 30"],["IoT can reach Main",false]]},
+  {n:"Static routes",s:"1 route",src:O,r:[["10.20.0.0/24","via 192.168.1.2"]]},
+  {n:"DNS and hostnames",s:"3 local names",src:O,r:[["nas.lan","192.168.1.12"],["printer.lan","192.168.1.60"],["Block DNS rebinding",true]]}
+ ]],
+ ["Wi-Fi",[
+  {n:"Wireless",s:"Home-5G, 2.4 and 5 GHz",go:"wifi",src:U},
+  {n:"Guest network",s:"Off",src:U,r:[["Guest network",false],["Name","Home-Guest"],["Speed limit","10 Mbps"],["Turn off after","8 hours"]]},
+  {n:"Mesh Wi-Fi",s:"2 access points",p:"Linked",src:U,r:[["Living room","Main"],["Upstairs","Good signal"],["Fast roaming",true]]},
+  {n:"Channel scan",s:"Channel 44 is clearest",src:U,r:[["2.4 GHz","Channel 6, crowded"],["5 GHz","Channel 44, clear"],["Pick channels automatically",true]]}
+ ]],
+ ["Protection",[
+  {n:"AdGuard Home",s:"6,127 blocked today",p:"On",go:"adguard",src:"Add-on"},
+  {n:"Parental controls",s:"1 schedule active",src:U,r:[["Kid's tablet","Off 9:30 pm to 6:30 am"],["Days","Mon to Fri"],["Schedule active",true]]},
+  {n:"Network protection",s:"Built-in blocking",p:"On",src:U,r:[["Block ads",true],["Block threats",true],["Blocked today","1,284"]]},
+  {n:"Firewall",s:"3 zones",src:U,r:[["Home to Internet","Allowed"],["Guest to Home","Blocked"],["Internet to Home","Blocked"]]},
+  {n:"Port forwarding",s:"2 rules",src:U,r:[["Camera","8443 to 192.168.1.70"],["Game server","25565 to 192.168.1.12"]]},
+  {n:"DMZ",s:"Off",src:U,r:[["Expose one device",false],["Device","None"]]},
+  {n:"UPnP",s:"3 ports opened by apps",p:"On",src:U,r:[["UPnP",true],["Open now","3 ports"]]}
+ ]],
+ ["VPN",[
+  {n:"WireGuard",s:"Server on, 2 peers",p:"On",src:U,r:[["Server",true],["Phone","Connected"],["Laptop","Last seen 3 days ago"],["Add a device","Show QR code"]]},
+  {n:"OpenVPN",s:"Client off",src:U,r:[["Client",false],["Profile","office.ovpn"]]},
+  {n:"Tailscale",s:"Connected",p:"On",src:U,r:[["Tailscale",true],["Address","100.64.0.7"],["Share home network",true]]}
+ ]],
+ ["Speed and usage",[
+  {n:"Smart Queue (QoS)",s:"Less lag on calls and games",p:"On",src:U,r:[["Smart Queue",true],["Download limit","95 Mbps"],["Upload limit","19 Mbps"]]},
+  {n:"Traffic monitor",s:"42.6 Mbps down",src:U,r:[["Download","42.6 Mbps"],["Upload","6.1 Mbps"],["Top device","Smart TV"]]},
+  {n:"Usage history",s:"412 GB this month",src:U,r:[["Today","18.4 GB"],["This month","412 GB"],["Smart TV","188 GB"],["Office laptop","96 GB"]]},
+  {n:"Speed test",s:"Last: 94 down, 19 up",src:O,r:[["Download","94 Mbps"],["Upload","19 Mbps"],["Ping","14 ms"]]}
+ ]],
+ ["Storage",[
+  {n:"USB storage",s:"1 TB drive, 62% full",src:U,r:[["File sharing (SMB)",true],["Share name","\\\\router\\media"],["Free space","380 GB"]]},
+  {n:"Media server",s:"DLNA for TVs",p:"On",src:U,r:[["Media server",true],["Library","1,204 files"]]}
+ ]],
+ ["System",[
+  {n:"Administration",s:"Name, time, password",src:U,r:[["Router name","Home router"],["Time zone","Asia/Kolkata"],["Password","Change"]]},
+  {n:"Scheduled restart",s:"Sundays 4:00 am",src:U,r:[["Restart weekly",true],["When","Sunday 4:00 am"],["Restart now","Restart"]]},
+  {n:"Backup and restore",s:"Last backup 3 Nov",src:U,r:[["Save backup to phone","Save"],["Restore from file","Choose file"],["Reset to defaults","Reset"]]},
+  {n:"Firmware",s:"OpenWrt 24.10",p:"Update ready",pw:1,src:U,r:[["Installed","24.10.2"],["Available","24.10.4"],["Keep settings",true]]},
+  {n:"Software",s:"148 packages",src:U,r:[["Installed","148"],["Updates","5 available"],["Install a package","Search"]]},
+  {n:"Plugins",s:"Mesh Wi-Fi, Ping",src:U,r:[["Mesh Wi-Fi",true],["Ping",true]]},
+  {n:"Diagnostics",s:"Ping, traceroute, lookup",src:O,r:[["Ping","Run"],["Traceroute","Run"],["DNS lookup","Run"]]},
+  {n:"System health",s:"CPU 8%, memory 41%",src:O,r:[["CPU","8%"],["Memory","41% of 512 MB"],["Storage","23 MB free"],["Temperature","52 °C"]]},
+  {n:"System log",s:"No errors today",src:U,r:[["Errors today","0"],["Warnings","2"],["Open log","View"]]},
+  {n:"Services",s:"14 running",src:O,r:[["adguardhome",true],["sqm",true],["miniupnpd",true],["minidlna",true]]},
+  {n:"Scheduled tasks",s:"2 tasks",src:O,r:[["Weekly restart","Sun 4:00"],["Wi-Fi off at night",false]]},
+  {n:"SSH access",s:"LAN only, 1 key",src:O,r:[["Allow SSH",true],["From internet",false],["Keys","1"]]},
+  {n:"LED lights",s:"Dim at night",src:O,r:[["Lights on",true],["Off from","11 pm to 6 am"]]}
+ ]]
+];
+const flat=[];
+$("#morelist").innerHTML=groups.map(([g,items])=>`<div class="eyebrow">${g}</div><div class="list">`+items.map(f=>{flat.push(f);
+  return `<button data-ft="${flat.length-1}"><span class="grow"><b>${f.n}</b><br><span class="sub">${f.s}</span></span>${f.p?`<span class="pill ${f.pw?"warn":""}">${f.p}</span>`:`<span class="chev">›</span>`}</button>`}).join("")+`</div>`).join("")
+ +`<div class="eyebrow">App settings</div><div class="list"><button role="switch" aria-checked="true" data-sw><span class="grow"><b>Fingerprint lock</b></span><span class="sw" aria-checked="true"></span></button><button data-go="find"><span class="grow"><b>Switch router</b></span><span class="chev">›</span></button></div>`;
+$("#ft-count").textContent=flat.length+" features";
+const notes={[U]:"Part of UnTangled. In the real app this screen loads from the router.",[O]:"Not in UnTangled today. The app would add this screen itself by talking to OpenWrt directly."};
+$("#morelist").addEventListener("click",e=>{
+  const b=e.target.closest("[data-ft]"); if(!b)return; const f=flat[b.dataset.ft];
+  if(f.go){go(f.go);return}
+  $("#ft-name").textContent=f.n; $("#ft-sub").textContent=f.s;
+  $("#ft-pill").innerHTML=f.p?`<span class="pill ${f.pw?"warn":""}">${f.p}</span>`:"";
+  $("#ft-rows").innerHTML=f.r.map(([k,v])=>typeof v==="boolean"
+    ?`<button role="switch" aria-checked="${v}" data-sw><span class="grow"><b>${k}</b></span><span class="sw" aria-checked="${v}"></span></button>`
+    :`<div><span class="grow"><b>${k}</b></span><span class="val">${v}</span></div>`).join("");
+  $("#ft-note").textContent=notes[f.src]+" Values are examples.";
+  go("feature");
+});
+// adguard
+function agSet(on,msg){flip($("#ag-sw"),on);$("#ag-pill").textContent=on?"Protecting":"Paused";$("#ag-pill").className="pill"+(on?"":" warn");
+  $("#ag-state").textContent=msg||(on?"Blocking ads, trackers and unsafe sites for every device.":"Nothing is being blocked.");}
+$("#ag-sw").addEventListener("click",()=>agSet($("#ag-sw").getAttribute("aria-checked")!=="true"));
+$("#ag-pause").addEventListener("click",()=>agSet(false,"Paused for 10 minutes, then turns back on."));
+</script>
+</body>
+</html>

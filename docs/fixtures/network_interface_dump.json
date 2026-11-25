@@ -1,0 +1,168 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    0,
+    {
+      "interface": [
+        {
+          "interface": "lan",
+          "up": true,
+          "pending": false,
+          "available": true,
+          "autostart": true,
+          "dynamic": false,
+          "uptime": 57428,
+          "l3_device": "br-lan",
+          "proto": "static",
+          "device": "br-lan",
+          "updated": [
+            "addresses"
+          ],
+          "metric": 0,
+          "dns_metric": 0,
+          "delegation": true,
+          "ipv4-address": [
+            {
+              "address": "192.168.1.10",
+              "mask": 24
+            }
+          ],
+          "ipv6-address": [],
+          "ipv6-prefix": [],
+          "ipv6-prefix-assignment": [
+            {
+              "address": "fd00::1::",
+              "mask": 60,
+              "local-address": {
+                "address": "fd00::1::1",
+                "mask": 60
+              }
+            }
+          ],
+          "route": [],
+          "dns-server": [],
+          "dns-search": [],
+          "neighbors": [],
+          "inactive": {
+            "ipv4-address": [],
+            "ipv6-address": [],
+            "route": [],
+            "dns-server": [],
+            "dns-search": [],
+            "neighbors": []
+          },
+          "data": {}
+        },
+        {
+          "interface": "loopback",
+          "up": true,
+          "pending": false,
+          "available": true,
+          "autostart": true,
+          "dynamic": false,
+          "uptime": 57427,
+          "l3_device": "lo",
+          "proto": "static",
+          "device": "lo",
+          "updated": [
+            "addresses"
+          ],
+          "metric": 0,
+          "dns_metric": 0,
+          "delegation": true,
+          "ipv4-address": [
+            {
+              "address": "127.0.0.1",
+              "mask": 8
+            }
+          ],
+          "ipv6-address": [],
+          "ipv6-prefix": [],
+          "ipv6-prefix-assignment": [],
+          "route": [],
+          "dns-server": [],
+          "dns-search": [],
+          "neighbors": [],
+          "inactive": {
+            "ipv4-address": [],
+            "ipv6-address": [],
+            "route": [],
+            "dns-server": [],
+            "dns-search": [],
+            "neighbors": []
+          },
+          "data": {}
+        },
+        {
+          "interface": "tailscale",
+          "up": false,
+          "pending": false,
+          "available": false,
+          "autostart": true,
+          "dynamic": false,
+          "proto": "none",
+          "device": "tailscale0",
+          "data": {},
+          "errors": [
+            {
+              "subsystem": "interface",
+              "code": "NO_DEVICE"
+            }
+          ]
+        },
+        {
+          "interface": "wan",
+          "up": true,
+          "pending": false,
+          "available": true,
+          "autostart": true,
+          "dynamic": false,
+          "uptime": 52178,
+          "l3_device": "wan",
+          "proto": "static",
+          "device": "wan",
+          "updated": [
+            "addresses",
+            "routes"
+          ],
+          "metric": 0,
+          "dns_metric": 0,
+          "delegation": true,
+          "ipv4-address": [
+            {
+              "address": "192.168.1.11",
+              "mask": 24
+            }
+          ],
+          "ipv6-address": [],
+          "ipv6-prefix": [],
+          "ipv6-prefix-assignment": [],
+          "route": [
+            {
+              "target": "0.0.0.0",
+              "mask": 0,
+              "nexthop": "192.168.1.12",
+              "source": "0.0.0.0/0"
+            }
+          ],
+          "dns-server": [
+            "192.168.1.12",
+            "192.168.1.13"
+          ],
+          "dns-search": [],
+          "neighbors": [],
+          "inactive": {
+            "ipv4-address": [],
+            "ipv6-address": [],
+            "route": [],
+            "dns-server": [],
+            "dns-search": [],
+            "neighbors": []
+          },
+          "data": {}
+        }
+      ]
+    }
+  ]
+}

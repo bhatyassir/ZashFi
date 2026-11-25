@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    0,
+    {
+      "kernel": "6.18.39",
+      "hostname": "router-test",
+      "system": "ARMv8 Processor rev 0",
+      "model": "JioRouter AX6000 JIDU6J11",
+      "board_name": "jiorouter,ax6000-jidu6j11",
+      "rootfs_type": "squashfs",
+      "release": {
+        "distribution": "OpenWrt",
+        "version": "SNAPSHOT",
+        "firmware_url": "https://downloads.openwrt.org/",
+        "revision": "r35581+43-c22686329b",
+        "target": "qualcommbe/ipq95xx",
+        "description": "OpenWrt SNAPSHOT r35581+43-c22686329b",
+        "builddate": "1785730759"
+      }
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    0,
+    {
+      "dhcp_leases": [
+        {
+          "expires": 20783,
+          "hostname": "Device-12",
+          "macaddr": "02:00:00:00:00:13",
+          "ipaddr": "198.51.100.13"
+        },
+        {
+          "expires": 21366,
+          "hostname": "Device-13",
+          "macaddr": "02:00:00:00:00:0d",
+          "ipaddr": "198.51.100.9"
+        },
+        {
+          "expires": 38957,
+          "hostname": "Device-14",
+          "macaddr": "02:00:00:00:00:0b",
+          "ipaddr": "198.51.100.7"
+        },
+        {
+          "expires": 21536,
+          "hostname": "Device-15",
+          "macaddr": "02:00:00:00:00:0f",
+          "ipaddr": "198.51.100.10"
+        },
+        {
+          "expires": 23870,
+          "hostname": "Device-16",
+          "macaddr": "02:00:00:00:00:11",
+          "ipaddr": "198.51.100.12"
+        },
+        {
+          "expires": 34549,
+          "hostname": "Device-17",
+          "macaddr": "02:00:00:00:00:1a",
+          "ipaddr": "198.51.100.17"
+        },
+        {
+          "expires": 18158,
+          "hostname": "Device-18",
+          "macaddr": "02:00:00:00:00:1b",
+          "ipaddr": "198.51.100.18"
+        },
+        {
+          "expires": 33649,
+          "hostname": "Device-19",
+          "macaddr": "02:00:00:00:00:16",
+          "ipaddr": "198.51.100.15"
+        },
+        {
+          "expires": 33648,
+          "macaddr": "02:00:00:00:00:14",
+          "ipaddr": "198.51.100.14"
+        }
+      ],
+      "dhcp6_leases": []
+    }
+  ]
+}

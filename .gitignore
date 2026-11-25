@@ -1,0 +1,36 @@
+# Starter merge temporary folder
+_starter_merge/
+
+# External references
+reference/
+reference/untangled/
+
+# Android / Gradle local files
+local.properties
+.gradle/
+build/
+*/build/
+app/build/
+*.keystore
+*.jks
+*.p12
+*.pfx
+
+# IDE / System
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Local router configuration for test/probe tools (never commit secrets/addresses/pins)
+tools/local_router.json
+tools/local_private_words.json
+
+# Local build log written by tools/build_check.bat
+build_check.log
+
+# M8 probe fixtures (do not commit until reviewed and confirmed by user)
+docs/fixtures/m8_*
+

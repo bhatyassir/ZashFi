@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">ZashFi</string>
+    <string name="app_about">About %1$s</string>
+    <string name="app_unlock">Unlock %1$s</string>
+    <string name="app_locked">%1$s is locked</string>
+    <string name="connection_core_title">%1$s Connection Core</string>
+    <string name="tile_adguard_pause">Pause AdGuard</string>
+    <string name="tile_guest_wifi">Guest Wi-Fi</string>
+    <string name="widget_name">Router status</string>
+    <string name="widget_description">Internet, devices online and AdGuard, as last seen by the app</string>
+    <string name="widget_empty">Open the app to see your router</string>
+</resources>
+

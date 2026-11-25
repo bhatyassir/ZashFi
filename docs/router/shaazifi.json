@@ -1,0 +1,205 @@
+{
+  "shaazifi": {
+    "description": "ShaaziFi app: read-only screens, plus named setting changes always applied with rollback (see docs/router/README.md).",
+    "read": {
+      "ubus": {
+        "session": [
+          "access"
+        ],
+        "system": [
+          "board",
+          "info"
+        ],
+        "network.interface": [
+          "dump"
+        ],
+        "network.device": [
+          "status"
+        ],
+        "network.wireless": [
+          "status"
+        ],
+        "luci-rpc": [
+          "getDHCPLeases",
+          "getHostHints",
+          "getNetworkDevices",
+          "getWirelessDevices"
+        ],
+        "iwinfo": [
+          "assoclist",
+          "countrylist",
+          "freqlist",
+          "scan",
+          "txpowerlist"
+        ],
+        "hostapd.*": [
+          "get_clients"
+        ],
+        "untangled.mesh": [
+          "info",
+          "status",
+          "nodes"
+        ],
+        "log": [
+          "read"
+        ],
+        "uci": [
+          "get"
+        ],
+        "file": [
+          "read",
+          "exec"
+        ],
+        "rc": [
+          "list"
+        ],
+        "luci": [
+          "getRealtimeStats",
+          "getTimezones",
+          "getConntrackList"
+        ],
+        "luci.wireguard": [
+          "getWgInstances"
+        ]
+      },
+      "uci": [
+        "dhcp",
+        "firewall",
+        "network",
+        "ddns",
+        "mwan3",
+        "upnpd",
+        "sqm",
+        "openvpn",
+        "system",
+        "uhttpd",
+        "minidlna",
+        "ksmbd",
+        "samba4",
+        "adblock",
+        "banip"
+      ],
+      "file": {
+        "/proc/stat": [
+          "read"
+        ],
+        "/proc/net/nf_conntrack": [
+          "read"
+        ],
+        "/proc/mounts": [
+          "read"
+        ],
+        "/usr/bin/vnstat --json": [
+          "exec"
+        ],
+        "/usr/sbin/nlbw -c json -g ip,mac -o rx_bytes": [
+          "exec"
+        ],
+        "/usr/sbin/tailscale status --json": [
+          "exec"
+        ],
+        "/usr/bin/tailscale status --json": [
+          "exec"
+        ],
+        "/usr/bin/apk list -I": [
+          "exec"
+        ],
+        "/bin/opkg list-installed": [
+          "exec"
+        ],
+        "/bin/ping -4 -c 5 -W 1 *": [
+          "exec"
+        ],
+        "/usr/bin/ping -4 -c 5 -W 1 *": [
+          "exec"
+        ],
+        "/bin/traceroute -4 -q 1 -w 1 -n -m 20 *": [
+          "exec"
+        ],
+        "/usr/bin/traceroute -4 -q 1 -w 1 -n -m 20 *": [
+          "exec"
+        ],
+        "/usr/bin/nslookup *": [
+          "exec"
+        ],
+        "/bin/dmesg -r": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "uci": [
+          "set",
+          "add",
+          "delete",
+          "revert",
+          "apply",
+          "confirm",
+          "rollback"
+        ],
+        "file": [
+          "exec"
+        ],
+        "rc": [
+          "init"
+        ],
+        "system": [
+          "reboot"
+        ],
+        "luci": [
+          "setPassword"
+        ]
+      },
+      "uci": [
+        "dhcp",
+        "firewall",
+        "wireless",
+        "upnpd",
+        "ddns",
+        "sqm",
+        "system",
+        "minidlna",
+        "adblock",
+        "banip",
+        "openvpn",
+        "network"
+      ],
+      "file": {
+        "/etc/init.d/firewall reload": [
+          "exec"
+        ],
+        "/usr/bin/etherwake -i *": [
+          "exec"
+        ],
+        "/usr/bin/ether-wake -i *": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd restart": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd stop": [
+          "exec"
+        ],
+        "/etc/init.d/miniupnpd enable": [
+          "exec"
+        ],
+        "/etc/init.d/ddns reload": [
+          "exec"
+        ],
+        "/etc/init.d/sqm restart": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna restart": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna stop": [
+          "exec"
+        ],
+        "/etc/init.d/minidlna enable": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

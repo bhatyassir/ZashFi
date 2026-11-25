@@ -1,0 +1,269 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    0,
+    {
+      "radio0": {
+        "up": true,
+        "pending": false,
+        "autostart": true,
+        "disabled": false,
+        "retry_setup_failed": false,
+        "config": {
+          "disabled": false,
+          "type": "mac80211",
+          "band": "2g",
+          "cell_density": 0,
+          "channel": "1",
+          "country": "IN",
+          "htmode": "HE20",
+          "path": "platform/soc@0/c000000.wifi"
+        },
+        "interfaces": [
+          {
+            "section": "default_radio0",
+            "config": {
+              "network": [
+                "lan"
+              ],
+              "isolate": false,
+              "device": [
+                "radio0"
+              ],
+              "mode": "ap",
+              "encryption": "psk2",
+              "ft_over_ds": false,
+              "ft_psk_generate_local": true,
+              "hidden": false,
+              "ieee80211k": true,
+              "ieee80211r": true,
+              "key": "REDACTED_SECRET",
+              "mobility_domain": "4f57",
+              "ssid": "FakeWiFi-Network",
+              "radios": []
+            },
+            "ifname": "phy0-ap0",
+            "vlans": [],
+            "stations": [],
+            "iwinfo": {
+              "noise": -108,
+              "channel": 1,
+              "country": "IN",
+              "phy": "phy0",
+              "txpower": 30,
+              "frequency": 2412,
+              "hwmodes": [
+                "b",
+                "g",
+                "n",
+                "ax"
+              ],
+              "hwmodes_text": "ax/b/g/n",
+              "htmodes": [
+                "HT20",
+                "HT40",
+                "HE20",
+                "HE40"
+              ],
+              "hardware": {
+                "id": [
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "name": "Generic MAC80211"
+              },
+              "quality_max": 70,
+              "mode": "Master",
+              "ssid": "FakeWiFi-Network",
+              "bssid": "02:00:00:00:00:03",
+              "encryption": {
+                "enabled": true,
+                "wpa": [
+                  2
+                ],
+                "authentication": [
+                  "psk"
+                ],
+                "ciphers": [
+                  "ccmp"
+                ]
+              }
+            }
+          }
+        ],
+        "iwinfo": {
+          "noise": -108,
+          "channel": 1,
+          "country": "IN",
+          "phy": "phy0",
+          "txpower": 30,
+          "frequency": 2412,
+          "hwmodes": [
+            "b",
+            "g",
+            "n",
+            "ax"
+          ],
+          "hwmodes_text": "ax/b/g/n",
+          "htmodes": [
+            "HT20",
+            "HT40",
+            "HE20",
+            "HE40"
+          ],
+          "hardware": {
+            "id": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "name": "Generic MAC80211"
+          }
+        }
+      },
+      "radio1": {
+        "up": true,
+        "pending": false,
+        "autostart": true,
+        "disabled": false,
+        "retry_setup_failed": false,
+        "config": {
+          "disabled": false,
+          "type": "mac80211",
+          "band": "5g",
+          "cell_density": 0,
+          "channel": "149",
+          "country": "IN",
+          "htmode": "HE80",
+          "path": "soc@0/10000000.pcie/pci0001:00/0001:00:00.0/0001:01:00.0"
+        },
+        "interfaces": [
+          {
+            "section": "default_radio1",
+            "config": {
+              "network": [
+                "lan"
+              ],
+              "isolate": false,
+              "device": [
+                "radio1"
+              ],
+              "mode": "ap",
+              "encryption": "psk2",
+              "ft_over_ds": false,
+              "ft_psk_generate_local": true,
+              "hidden": false,
+              "ieee80211k": true,
+              "ieee80211r": true,
+              "key": "REDACTED_SECRET",
+              "mobility_domain": "4f57",
+              "ssid": "FakeWiFi-Network",
+              "radios": []
+            },
+            "ifname": "phy1-ap0",
+            "vlans": [],
+            "stations": [],
+            "iwinfo": {
+              "noise": -107,
+              "channel": 149,
+              "country": "IN",
+              "phy": "phy1",
+              "txpower": 30,
+              "txpower_offset": 0,
+              "frequency": 5745,
+              "frequency_offset": 0,
+              "hwmodes": [
+                "n",
+                "ac",
+                "ax"
+              ],
+              "hwmodes_text": "ac/ax/n",
+              "htmodes": [
+                "HT20",
+                "HT40",
+                "VHT20",
+                "VHT40",
+                "VHT80",
+                "VHT80+80",
+                "VHT160",
+                "HE20",
+                "HE40",
+                "HE80",
+                "HE80+80",
+                "HE160"
+              ],
+              "hardware": {
+                "id": [
+                  6091,
+                  4356,
+                  6091,
+                  4356
+                ],
+                "name": "Qualcomm Atheros QCN6024/9024/9074"
+              },
+              "quality_max": 70,
+              "mode": "Master",
+              "ssid": "FakeWiFi-Network",
+              "bssid": "02:00:00:00:00:04",
+              "encryption": {
+                "enabled": true,
+                "wpa": [
+                  2
+                ],
+                "authentication": [
+                  "psk"
+                ],
+                "ciphers": [
+                  "ccmp"
+                ]
+              }
+            }
+          }
+        ],
+        "iwinfo": {
+          "noise": -107,
+          "channel": 149,
+          "country": "IN",
+          "phy": "phy1",
+          "txpower": 30,
+          "txpower_offset": 0,
+          "frequency": 5745,
+          "frequency_offset": 0,
+          "hwmodes": [
+            "n",
+            "ac",
+            "ax"
+          ],
+          "hwmodes_text": "ac/ax/n",
+          "htmodes": [
+            "HT20",
+            "HT40",
+            "VHT20",
+            "VHT40",
+            "VHT80",
+            "VHT80+80",
+            "VHT160",
+            "HE20",
+            "HE40",
+            "HE80",
+            "HE80+80",
+            "HE160"
+          ],
+          "hardware": {
+            "id": [
+              6091,
+              4356,
+              6091,
+              4356
+            ],
+            "name": "Qualcomm Atheros QCN6024/9024/9074"
+          }
+        }
+      }
+    }
+  ]
+}
