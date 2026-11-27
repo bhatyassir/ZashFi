@@ -44,6 +44,20 @@ object Phase4 {
             note = "$note This runs once; there is no automatic undo.", ubusCall = UbusCall("rc", "init", mapOf("name" to name, "action" to action))))
     }
 
+    /** Owner's `/usr/bin/led-nightmode` script: a one-shot command, no settings are written. */
+    val LED_MODES = setOf("night", "day")
+
+    fun ledMode(mode: String): PlanResult {
+        if (mode !in LED_MODES) return PlanResult.Invalid("Choose night or day.")
+        val after = if (mode == "night") "LEDs off" else "Green LED on"
+        return PlanResult.Ready(ChangePlan(
+            if (mode == "night") "Turn the LEDs off until morning?" else "Turn the green LED on?",
+            listOf(ChangeLine("LED mode", "Current", after)), emptyList(),
+            note = "Runs your router's led-nightmode script once. The crontab schedule still controls the nightly change. No automatic undo.",
+            command = "/usr/bin/led-nightmode" to listOf(mode)
+        ))
+    }
+
     fun reboot(typed: String): PlanResult {
         if (typed.trim() != "RESTART") return PlanResult.Invalid("Type RESTART to confirm.")
         return PlanResult.Ready(ChangePlan(
@@ -108,24 +122,38 @@ object Phase4 {
         val name = v["name"].orEmpty().trim()
         val src = v["src"].orEmpty().trim()
         val dest = v["dest"].orEmpty().trim()
-        val proto = v["proto"].orEmpty().trim().lowercase().ifEmpty { "tcp udp" }
+        val rawProto = v["proto"].orEmpty().trim().lowercase().ifEmpty { "tcp udp" }
         val port = v["dest_port"].orEmpty().trim()
         val target = v["target"].orEmpty().trim().uppercase()
         if (name.isEmpty() || name.length > 64) return PlanResult.Invalid("Give the rule a short name.")
         if (src.isNotEmpty() && src != "*" && src !in zones) return PlanResult.Invalid("Source zone must be one of: ${zones.joinToString(", ")}.")
         if (dest.isNotEmpty() && dest != "*" && dest !in zones) return PlanResult.Invalid("Destination zone must be one of: ${zones.joinToString(", ")}.")
-        if (proto.split(' ').any { it !in setOf("tcp", "udp", "icmp", "all") }) return PlanResult.Invalid("Protocol: tcp, udp, icmp or all.")
-        if (port.isNotEmpty() && (!PORTS.matches(port) || port.split('-').any { (it.toIntOrNull() ?: 0) !in 1..65535 })) return PlanResult.Invalid("Port must be 1 to 65535, or a range like 8000-8100.")
+        val protos = rawProto.split(Regex("[\\s,/]+")).filter { it.isNotEmpty() }.flatMap {
+            if (it == "both") listOf("tcp", "udp") else listOf(it)
+        }.distinct()
+        if (protos.isEmpty() || protos.any { it !in setOf("tcp", "udp", "icmp", "all") }) {
+            return PlanResult.Invalid("Protocol: tcp, udp, icmp or all.")
+        }
+        if (port.isNotEmpty()) {
+            if (protos.none { it in setOf("tcp", "udp", "all") }) {
+                return PlanResult.Invalid("Ports apply only to tcp or udp rules.")
+            }
+            val nums = if (PORTS.matches(port)) port.split('-').map { it.toIntOrNull() ?: 0 } else emptyList()
+            if (nums.isEmpty() || nums.any { it !in 1..65535 } || (nums.size == 2 && nums[0] > nums[1])) {
+                return PlanResult.Invalid("Port must be 1 to 65535, or a range like 8000-8100.")
+            }
+        }
         if (target !in POLICIES) return PlanResult.Invalid("Action: ACCEPT, REJECT or DROP.")
         val values = linkedMapOf<String, Any>("name" to name)
         if (src.isNotEmpty()) values["src"] = src
         if (dest.isNotEmpty()) values["dest"] = dest
-        values["proto"] = proto
+        values["proto"] = if (protos.size == 1) protos.single() else protos
         if (port.isNotEmpty()) values["dest_port"] = port
         values["target"] = target
+        val protoLabel = protos.joinToString("/")
         return PlanResult.Ready(ChangePlan(
             "Add the rule \"$name\"?",
-            listOf(ChangeLine("Rule", "", "${src.ifEmpty { "router" }} → ${dest.ifEmpty { "router" }} $proto${if (port.isNotEmpty()) " port $port" else ""}: $target")),
+            listOf(ChangeLine("Rule", "", "${src.ifEmpty { "router" }} → ${dest.ifEmpty { "router" }} $protoLabel${if (port.isNotEmpty()) " port $port" else ""}: $target")),
             listOf(UciOp.Add("firewall", "rule", values)), reloadFirewall = true,
             note = "If the app cannot reach the router afterwards, the router undoes this within 2 minutes."
         ))
@@ -164,11 +192,19 @@ object Phase4 {
         ))
     }
 
-    fun removeRoute(iface: String, target: String) = PlanResult.Ready(ChangePlan(
-        "Remove the route to $target?", listOf(ChangeLine("Route", "$target on $iface", "Removed")),
-        listOf(UciOp.DeleteWhere("network", "route", mapOf("interface" to iface, "target" to target))),
-        note = "If the app cannot reach the router afterwards, the router undoes this within 2 minutes."
-    ))
+    fun removeRoute(iface: String, target: String, gateway: String? = null, metric: String? = null): PlanResult {
+        val i = iface.trim()
+        val t = target.trim()
+        if (i.isEmpty() || t.isEmpty()) return PlanResult.Invalid("Route interface and target are required.")
+        val match = linkedMapOf("interface" to i, "target" to t)
+        gateway?.trim()?.takeIf { it.isNotEmpty() }?.let { match["gateway"] = it }
+        metric?.trim()?.takeIf { it.isNotEmpty() }?.let { match["metric"] = it }
+        return PlanResult.Ready(ChangePlan(
+            "Remove the route to $t?", listOf(ChangeLine("Route", "$t on $i", "Removed")),
+            listOf(UciOp.DeleteWhere("network", "route", match)),
+            note = "If the app cannot reach the router afterwards, the router undoes this within 2 minutes."
+        ))
+    }
 
     fun routeEnabled(id: String, label: String, enable: Boolean) = PlanResult.Ready(ChangePlan(
         if (enable) "Turn on the route to $label?" else "Turn off the route to $label?",

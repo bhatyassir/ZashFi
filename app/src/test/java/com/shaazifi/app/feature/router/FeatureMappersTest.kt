@@ -150,12 +150,44 @@ class FeatureMappersTest {
         val missing = FeatureMappers.usage(null, null, "wan", emptyMap())
         assertTrue(allText(missing).contains("vnstat"))
         assertTrue(allText(missing).contains("nlbwmon"))
+
+        // Dual-stack nlbw rows for the same MAC are grouped into one By device row.
+        val dualStack = """{"columns":["ip","mac","rx_bytes","tx_bytes"],"data":[
+            ["192.168.1.5","aa:bb:cc:dd:ee:ff",1000,500],
+            ["fd00::5","AA:BB:CC:DD:EE:FF",2000,250]]}"""
+        val grouped = FeatureMappers.usage(null, dualStack, null, mapOf("AA:BB:CC:DD:EE:FF" to "Laptop"))
+        val byDevice = grouped.sections.first { it.heading == "By device" }.rows
+        assertEquals(1, byDevice.size)
+        assertTrue(byDevice[0].sub!!.startsWith("192.168.1.5"))
+
+        // vnstat jsonversion 1 reports KiB and scales to bytes; stale day does not show as Today when todayDate is given.
+        val vnV1 = """{"vnstatversion":"1.18","jsonversion":"1","interfaces":[{"name":"wan","traffic":{
+            "day":[{"date":{"year":2026,"month":11,"day":16},"rx":1024,"tx":0}],
+            "month":[{"date":{"year":2026,"month":11},"rx":2048,"tx":0}]}}]}"""
+        val v1SameDay = FeatureMappers.usage(vnV1, null, "wan", emptyMap(), todayDate = Triple(2026, 11, 16))
+        assertTrue(allText(v1SameDay).contains("1.0 MB"))
+        val v1LaterDay = FeatureMappers.usage(vnV1, null, "wan", emptyMap(), todayDate = Triple(2026, 11, 20))
+        assertEquals("Today 0 B", v1LaterDay.pill?.text)
+
+        // Non-zero exit codes report an error instead of "Needs package".
+        val errUsage = FeatureMappers.usage(
+            null, null, "wan", emptyMap(),
+            vnstatResult = ExecResult(1, "", "db not found"),
+            nlbwResult = ExecResult(2, "", "socket failed")
+        )
+        assertTrue(allText(errUsage).contains("exit 1"))
+        assertTrue(allText(errUsage).contains("exit 2"))
     }
 
     @Test
     fun packageListsFromApkAndOpkg() {
-        val apk = "vnstat-2.12-r1 aarch64 {vnstat} (GPL-2.0) [installed]\nluci-app-sqm-1.2 noarch {luci} (Apache) [installed]\n"
-        assertEquals(listOf("vnstat", "luci-app-sqm"), FeatureMappers.parsePackages(apk))
+        val apk = "vnstat-2.12-r1 aarch64 {vnstat} (GPL-2.0) [installed]\nluci-app-sqm-1.2 noarch {luci} (Apache) [installed]\nsamba4-server-4.20.0-r1 aarch64 {samba4} (GPL-3.0) [installed]\nfoo-2-bar-1.0-r1 aarch64 {foo} (MIT) [installed]\n"
+        assertEquals(listOf("vnstat", "luci-app-sqm", "samba4-server", "foo-2-bar"), FeatureMappers.parsePackages(apk))
+        val apkInfo = "vnstat2\nsamba4-server\n"
+        assertEquals(listOf("vnstat2", "samba4-server"), FeatureMappers.parsePackages(apkInfo))
+        val soft = FeatureMappers.software(apkInfo)
+        assertTrue(soft.sections.first().rows.any { it.label == "vnstat2" && it.pill?.text == "Installed" })
+        assertTrue(soft.sections.first().rows.any { it.label == "samba4-server" && it.pill?.text == "Installed" })
         val opkg = "tailscale - 1.80.0-1\nsqm-scripts - 1.6.0-1\n"
         assertEquals(listOf("tailscale", "sqm-scripts"), FeatureMappers.parsePackages(opkg))
     }
@@ -172,11 +204,56 @@ class FeatureMappersTest {
 
     @Test
     fun tailscaleStatus() {
-        val out = """{"BackendState":"Running","Self":{"HostName":"router","TailscaleIPs":["100.64.0.7"]},
+        val out = """{"BackendState":"Running","Self":{"HostName":"router","TailscaleIPs":["100.64.0.7"],"PrimaryRoutes":["192.168.1.0/24","0.0.0.0/0"],"ExitNodeOption":true},
+            "ExitNodeStatus":{"ID":"n1","TailscaleIPs":["100.64.0.99"],"Online":true},
             "Peer":{"k1":{"HostName":"phone","TailscaleIPs":["100.64.0.8"],"OS":"android","Online":true}}}"""
         val view = FeatureMappers.tailscale(out)
         assertEquals("Connected", view.pill!!.text)
-        assertTrue(allText(view).contains("phone"))
+        val text = allText(view)
+        assertTrue(text.contains("phone"))
+        assertTrue(text.contains("192.168.1.0/24"))
+        assertTrue(text.contains("100.64.0.99"))
         assertEquals("Unknown", FeatureMappers.tailscale("not json").pill!!.text)
+        assertEquals("Stopped", FeatureMappers.tailscale("", exitCode = 1, stderr = "tailscaled not running").pill!!.text)
+        val loginView = FeatureMappers.tailscale("""{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/123","Self":{"HostName":"router","TailscaleIPs":[]}}""")
+        assertEquals("Sign in needed", loginView.pill!!.text)
+        assertTrue(allText(loginView).contains("https://login.tailscale.com/a/123"))
+    }
+
+    @Test
+    fun healthIncludesThermalsBoardAndOffloading() {
+        val info = fixture("m7_system_info.json")
+        val board = fixture("m7_system_board.json")
+        val thermals = listOf(
+            ThermalSensor("tz0", "nss-top", "NSS", 62.4, maxCelsius = 90.0),
+            ThermalSensor("tz1", "cpu", "Processor", 78.0, critCelsius = 105.0),
+            ThermalSensor("tz2", "wifi", "Wi-Fi radio", 86.5, critCelsius = 100.0)
+        )
+        val view = FeatureMappers.health(info, cpuPct = 15, thermals = thermals, board = board, offloading = FlowOffloadingStatus(software = true, hardware = true))
+        val thermSec = view.sections.first { it.heading == "Thermals" }
+        assertEquals(3, thermSec.rows.size)
+        assertEquals("62.4°C", thermSec.rows[0].value)
+        assertEquals(null, thermSec.rows[0].pill)
+        assertEquals("Warm", thermSec.rows[1].pill?.text)
+        assertEquals("Hot", thermSec.rows[2].pill?.text)
+        assertEquals("Hot", view.pill?.text)
+        val details = view.sections.first { it.heading == "Now" }.rows.filter { it.detail }
+        assertTrue(details.any { it.label == "Firmware" && it.value.contains("OpenWrt") })
+        assertTrue(details.any { it.label == "Kernel" && it.value == "6.18.39" })
+        assertTrue(details.any { it.label == "Hardware flow offloading" && it.value.contains("PPE") })
+    }
+
+    @Test
+    fun formsOfferChoiceChips() {
+        val wan = FeatureMappers.wan(uci("""{"wan":{".type":"interface","proto":"dhcp"}}"""), null)
+        assertEquals(listOf("dhcp", "static", "pppoe"), wan.forms.single().fields.first { it.key == "proto" }.choices)
+
+        val fw = FeatureMappers.firewall(uci("""{"z1":{".type":"zone","name":"lan"},"z2":{".type":"zone","name":"wan"}}"""))
+        assertEquals(listOf("ACCEPT", "REJECT", "DROP"), fw.sections[0].moreForms.first().fields.first { it.key == "input" }.choices)
+        assertEquals(listOf("yes", "no"), fw.sections[0].moreForms.first().fields.first { it.key == "masq" }.choices)
+        assertEquals(listOf("tcp", "udp", "icmp", "all"), fw.forms.single().fields.first { it.key == "proto" }.choices)
+
+        val routes = FeatureMappers.routes(uci("""{"lan":{".type":"interface"},"wan":{".type":"interface"}}"""))
+        assertEquals(listOf("lan", "wan"), routes.forms.single().fields.first { it.key == "interface" }.choices)
     }
 }

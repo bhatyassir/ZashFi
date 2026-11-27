@@ -19,18 +19,17 @@ class FeatureChangesTest {
     fun writerOnlyChangesNamedSettings() {
         fun set(config: String, values: Map<String, Any>) = RouterWriter.argsFor(UciOp.Set(config, "s1", values)).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) }
         assertTrue(set("wireless", mapOf("disabled" to "1")))
-        // Batch 2 deliberately allows the Wi-Fi name and password (typed by the owner, never read back);
-        // everything else about Wi-Fi stays refused (see FeatureChangesBatch2Test.writerKeepsWifiChangesNarrow).
-        assertFalse(set("wireless", mapOf("encryption" to "none")))
+        assertTrue(set("wireless", mapOf("encryption" to "sae-mixed", "ieee80211w" to "1")))
         assertFalse(set("wireless", mapOf("network" to "wan")))
         assertTrue(set("upnpd", mapOf("enabled" to "1", "enable_upnp" to "1", "enable_natpmp" to "1")))
         assertFalse(set("upnpd", mapOf("external_iface" to "x")))
-        assertTrue(set("sqm", mapOf("enabled" to "1", "download" to "90000", "upload" to "18000")))
-        assertFalse(set("sqm", mapOf("interface" to "eth0")))
+        assertTrue(set("sqm", mapOf("enabled" to "1", "download" to "90000", "upload" to "18000", "interface" to "eth0", "qdisc" to "cake", "script" to "piece_of_cake.qos", "linklayer" to "ethernet", "overhead" to "44")))
+        assertTrue(RouterWriter.argsFor(UciOp.Add("sqm", "queue", mapOf("interface" to "eth0", "enabled" to "1"))).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
+        assertFalse(set("sqm", mapOf("debug_logging" to "1")))
         assertTrue(set("ddns", mapOf("enabled" to "0")))
         assertFalse(set("ddns", mapOf("password" to "x")))
         assertFalse(set("network", mapOf("proto" to "dhcp")))
-        assertFalse(RouterWriter.argsFor(UciOp.Delete("wireless", "guest")).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
+        assertTrue(RouterWriter.argsFor(UciOp.Delete("wireless", "wifinet2")).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
         assertFalse(RouterWriter.argsFor(UciOp.Add("firewall", "zone", mapOf("name" to "x"))).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
         assertTrue(RouterWriter.argsFor(UciOp.DeleteOption("firewall", "r1", "weekdays")).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
         assertFalse(RouterWriter.argsFor(UciOp.DeleteOption("firewall", "r1", "target")).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) })
@@ -67,7 +66,12 @@ class FeatureChangesTest {
         assertTrue(error(FeatureChanges.addPortForward("X", "80", "192.168.1.1", "", "tcp", "192.168.1.1")).contains("router"))
         assertTrue(error(FeatureChanges.addPortForward("X", "80", "192.168.1.5", "", "icmp", "192.168.1.1")).isNotBlank())
         assertTrue(plan(FeatureChanges.addPortForward("Range", "6000-6010", "192.168.1.5", "", "udp", "192.168.1.1")).ops.isNotEmpty())
+        assertTrue(plan(FeatureChanges.addPortForward("Range2", "6000-6010", "192.168.1.5", "7000-7010", "udp", "192.168.1.1")).ops.isNotEmpty())
         assertTrue(error(FeatureChanges.addPortForward("Range", "6010-6000", "192.168.1.5", "", "udp", "192.168.1.1")).contains("port"))
+        assertTrue(error(FeatureChanges.addPortForward("Mismatch", "6000-6010", "192.168.1.5", "7000-7005", "tcp", "192.168.1.1")).contains("range"))
+        assertTrue(error(FeatureChanges.addPortForward("Mismatch2", "80", "192.168.1.5", "8000-8010", "tcp", "192.168.1.1")).contains("range"))
+        assertTrue(error(FeatureChanges.addPortForward("Mismatch3", "6000-6010", "192.168.1.5", "80", "tcp", "192.168.1.1")).contains("range"))
+        assertTrue(error(FeatureChanges.addPortForward("RouterSp", "80", "192.168.1.1", "", "tcp", " 192.168.1.1 ")).contains("router"))
 
         assertEquals(UciOp.Set("firewall", "r9", mapOf("enabled" to "0")), plan(FeatureChanges.redirectEnabled("r9", "Camera", false)).ops.single())
         assertEquals(UciOp.Delete("firewall", "r9"), plan(FeatureChanges.removeRedirect("r9", "Camera")).ops.single())
@@ -102,7 +106,10 @@ class FeatureChangesTest {
         assertEquals("06:30", sop.values["stop_time"])
         assertFalse("every day means no weekdays option", (plan(FeatureChanges.parentalSchedule("Tablet", "", "21:30", "06:30", names)).ops.single() as UciOp.Add).values.containsKey("weekdays"))
         assertTrue(error(FeatureChanges.parentalSchedule("Tablet", "Funday", "21:30", "06:30", names)).contains("day"))
+        assertTrue(error(FeatureChanges.parentalSchedule("Tablet", "Monx", "21:30", "06:30", names)).contains("day"))
+        assertEquals("Mon", (plan(FeatureChanges.parentalSchedule("Tablet", "Monday", "21:30", "06:30", names)).ops.single() as UciOp.Add).values["weekdays"])
         assertTrue(error(FeatureChanges.parentalSchedule("Tablet", "", "25:00", "06:30", names)).contains("time"))
+        assertTrue(error(FeatureChanges.parentalSchedule("Tablet", "", "9:00", "09:00", names)).contains("same"))
         assertTrue(error(FeatureChanges.parentalPause("nobody", names)).contains("device"))
         assertEquals(UciOp.Delete("firewall", "p1"), plan(FeatureChanges.removeParental("p1", "Tablet")).ops.single())
     }

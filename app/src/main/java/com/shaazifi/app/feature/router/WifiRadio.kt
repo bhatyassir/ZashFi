@@ -29,7 +29,8 @@ data class RadioInfo(
     val txpower: String?,
     val htmodes: List<String>,
     val channels: List<Int>,
-    val powers: List<Int>
+    val powers: List<Int>,
+    val countries: List<String> = emptyList()
 )
 
 data class ScanEntry(
@@ -55,13 +56,19 @@ object WifiRadio {
     private val RADIO = Regex("^radio[0-9]{1,2}$")
     fun isRadioName(s: String) = RADIO.matches(s)
 
-    fun radioInfos(wifi: JsonObject, freqlists: Map<String, JsonObject?>, powerlists: Map<String, JsonObject?>): List<RadioInfo> =
+    fun radioInfos(
+        wifi: JsonObject,
+        freqlists: Map<String, JsonObject?>,
+        powerlists: Map<String, JsonObject?>,
+        countrylists: Map<String, JsonObject?> = emptyMap()
+    ): List<RadioInfo> =
         wifi.mapNotNull { (id, el) ->
             val r = el.obj() ?: return@mapNotNull null
             val cfg = r["config"].obj()
-            val iw = r["iwinfo"].obj()
-            val band = cfg?.get("band").str() ?: ""
-            val bandNumber = band.removeSuffix("g").toIntOrNull()
+            val iw = r["iwinfo"].obj() ?: r["interfaces"].arr()?.firstOrNull().obj()?.get("iwinfo").obj()
+            val freq = iw?.get("frequency").int()
+            val band = cfg?.get("band").str()?.takeIf { it.isNotBlank() } ?: bandFromFrequency(freq)
+            val bandNumber = band.lowercase().removeSuffix("g").toIntOrNull()
             RadioInfo(
                 id = id,
                 band = band,
@@ -75,20 +82,43 @@ object WifiRadio {
                     (bandNumber == null || f["band"].int() == bandNumber) &&
                         !(f["restricted"].bool() == true && f["flags"].arr()?.any { it.str() == "no_ir" } == true)
                 }?.mapNotNull { it["channel"].int() }?.distinct().orEmpty(),
-                powers = powerlists[id]?.get("results").arr()?.mapNotNull { it.obj()?.get("dbm").int() }?.distinct().orEmpty()
+                powers = powerlists[id]?.get("results").arr()?.mapNotNull { it.obj()?.get("dbm").int() }?.distinct().orEmpty(),
+                countries = countrylists[id]?.get("results").arr()?.mapNotNull { entry ->
+                    val o = entry.obj() ?: return@mapNotNull null
+                    (o["code"].str() ?: o["iso3166"].str())?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
+                }?.distinct().orEmpty()
             )
         }
 
-    private fun family(htmode: String) = Regex("^[A-Z]+").find(htmode)?.value ?: ""
-    private fun mhz(htmode: String) = Regex("[0-9]+$").find(htmode)?.value?.toIntOrNull() ?: 0
-
-    /** Widths of the same kind as the current one (HE, VHT, HT, EHT), narrowest first. */
-    fun widthChoices(r: RadioInfo): List<String> {
-        val fam = family(r.htmode)
-        return r.htmodes.filter { fam.isEmpty() || family(it) == fam }.sortedBy { mhz(it) }
+    private fun familyRank(htmode: String): Int = when {
+        htmode.equals("NOHT", ignoreCase = true) -> 0
+        htmode.startsWith("HT", ignoreCase = true) -> 1
+        htmode.startsWith("VHT", ignoreCase = true) -> 2
+        htmode.startsWith("HE", ignoreCase = true) -> 3
+        htmode.startsWith("EHT", ignoreCase = true) -> 4
+        else -> 5
     }
 
-    fun widthLabel(htmode: String) = if (htmode.isBlank()) "Driver default" else "${mhz(htmode)} MHz ($htmode)"
+    internal fun mhz(htmode: String): Int {
+        val upper = htmode.trim().uppercase()
+        if (upper == "NOHT") return 20
+        Regex("(\\d+)\\+(\\d+)$").find(upper)?.let { m ->
+            val a = m.groupValues[1].toIntOrNull() ?: 0
+            val b = m.groupValues[2].toIntOrNull() ?: 0
+            return a + b
+        }
+        return Regex("[0-9]+$").find(upper)?.value?.toIntOrNull() ?: 0
+    }
+
+    /** Supported channel widths sorted narrowest-first across all advertised families (HT/VHT/HE/EHT). */
+    fun widthChoices(r: RadioInfo): List<String> =
+        r.htmodes.distinct().sortedWith(compareBy({ mhz(it) }, { familyRank(it) }, { it }))
+
+    fun widthLabel(htmode: String): String {
+        if (htmode.isBlank()) return "Driver default"
+        val w = mhz(htmode)
+        return if (w > 0) "$w MHz ($htmode)" else htmode
+    }
 
     fun radioSettings(r: RadioInfo, channel: String, width: String, country: String, power: String): PlanResult {
         val ch = channel.trim().lowercase()
@@ -98,7 +128,9 @@ object WifiRadio {
         if (ch != "auto" && (ch.toIntOrNull() == null || (r.channels.isNotEmpty() && ch.toInt() !in r.channels))) {
             return PlanResult.Invalid("Choose a channel this radio offers: auto${r.channels.joinToString("") { ", $it" }}.")
         }
-        if (w != r.htmode && w !in widthChoices(r)) return PlanResult.Invalid("Choose a width this radio offers: ${widthChoices(r).joinToString(", ")}.")
+        if (w != r.htmode.uppercase() && w !in widthChoices(r).map { it.uppercase() }) {
+            return PlanResult.Invalid("Choose a width this radio offers: ${widthChoices(r).joinToString(", ")}.")
+        }
         if (cc.isNotEmpty() && !Regex("^[A-Z0-9]{2}$").matches(cc)) return PlanResult.Invalid("Use a two-letter country code, for example IN.")
         if (pw != "default" && (pw.toIntOrNull() == null || (r.powers.isNotEmpty() && pw.toInt() !in r.powers))) {
             return PlanResult.Invalid("Choose a power this radio offers: default${r.powers.joinToString("") { ", $it" }} (dBm).")
@@ -107,10 +139,14 @@ object WifiRadio {
         val lines = mutableListOf<ChangeLine>()
         val ops = mutableListOf<UciOp>()
         if (ch != r.channel.lowercase()) { values["channel"] = ch; lines += ChangeLine("Channel", r.channel, ch) }
-        if (w != r.htmode) { values["htmode"] = w; lines += ChangeLine("Width", widthLabel(r.htmode), widthLabel(w)) }
-        if (cc.isNotEmpty() && cc != r.country) { values["country"] = cc; lines += ChangeLine("Country", r.country.ifBlank { "Default" }, cc) }
+        if (w != r.htmode.uppercase()) {
+            val canonicalWidth = widthChoices(r).firstOrNull { it.equals(w, ignoreCase = true) } ?: w
+            values["htmode"] = canonicalWidth
+            lines += ChangeLine("Width", widthLabel(r.htmode), widthLabel(canonicalWidth))
+        }
+        if (cc.isNotEmpty() && cc != r.country.uppercase()) { values["country"] = cc; lines += ChangeLine("Country", r.country.ifBlank { "Default" }, cc) }
         if (values.isNotEmpty()) ops += UciOp.Set("wireless", r.id, values)
-        val currentPower = r.txpower ?: "default"
+        val currentPower = (r.txpower ?: "default").lowercase()
         if (pw != currentPower) {
             ops += if (pw == "default") UciOp.DeleteOption("wireless", r.id, "txpower") else UciOp.Set("wireless", r.id, mapOf("txpower" to pw))
             lines += ChangeLine("Transmit power", if (currentPower == "default") "Default" else "$currentPower dBm", if (pw == "default") "Default" else "$pw dBm")
@@ -127,7 +163,29 @@ object WifiRadio {
         ))
     }
 
-    fun bandLabel(band: String) = when (band) { "2g" -> "2.4 GHz"; "5g" -> "5 GHz"; "6g" -> "6 GHz"; "60g" -> "60 GHz"; else -> band.ifBlank { "Wi-Fi" } }
+    fun bandFromFrequency(freqMhz: Int?): String = when (freqMhz) {
+        null -> ""
+        in 2400..2500 -> "2g"
+        in 4900..5925 -> "5g"
+        in 5926..7125 -> "6g"
+        in 57000..66000 -> "60g"
+        else -> ""
+    }
+
+    fun bandLabel(band: String) = when (band.trim().lowercase()) {
+        "2g", "2.4g", "2.4 ghz" -> "2.4 GHz"
+        "5g", "5 ghz" -> "5 GHz"
+        "6g", "6 ghz" -> "6 GHz"
+        "60g", "60 ghz" -> "60 GHz"
+        else -> band.ifBlank { "Wi-Fi" }
+    }
+
+    /** WPA/WPA2/WPA3 PSK: either 64 hex characters or 8..63 UTF-8 bytes without control chars. */
+    fun isValidWpaPsk(key: String): Boolean {
+        if (key.length == 64 && key.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return true
+        if (key.any { it.code < 32 || it.code == 127 }) return false
+        return key.toByteArray(Charsets.UTF_8).size in 8..63
+    }
 
     /** `iwinfo scan` results, strongest first. */
     fun parseScan(reply: JsonObject): List<ScanEntry> =
@@ -140,7 +198,7 @@ object WifiRadio {
                 enc == null || enc["enabled"].bool() == false -> "Open" to "none"
                 auth.any { it == "802.1x" || it == "8021x" } -> "Enterprise" to null
                 wep -> "WEP" to null
-                "sae" in auth && "psk" in auth -> "WPA2/WPA3" to "sae"
+                "sae" in auth && "psk" in auth -> "WPA2/WPA3" to "sae-mixed"
                 "sae" in auth -> "WPA3" to "sae"
                 "psk" in auth && 2 in wpa -> "WPA2" to "psk2"
                 "psk" in auth -> "WPA" to "psk"
@@ -166,8 +224,8 @@ object WifiRadio {
         )
         if (clientLinks(wifi).any { it.second == radio }) return PlanResult.Invalid("This radio is already connected to another network. Disconnect it first.")
         if (network.byId(CLIENT_NETWORK) != null && clientLinks(wifi).isNotEmpty()) return PlanResult.Invalid("The router is already connected to another network. Disconnect it first.")
-        if (enc != "none" && (password.length !in 8..63 || password.any { it.code !in 32..126 })) {
-            return PlanResult.Invalid("The password needs 8 to 63 letters, numbers or symbols.")
+        if (enc != "none" && !isValidWpaPsk(password)) {
+            return PlanResult.Invalid("The password needs 8 to 63 characters (or 64 hex digits).")
         }
         val wanZone = firewall.ofType("zone").firstOrNull { it.opt("name") == "wan" }
             ?: return PlanResult.Invalid("The router has no firewall zone named wan.")
@@ -187,16 +245,18 @@ object WifiRadio {
                 ChangeLine("Radio channel", "", bss.channel?.toString() ?: "unchanged")
             ),
             ops = ops,
+            reloadFirewall = true,
             longWait = true,
             note = "The router connects to \"${bss.ssid}\" and uses it for internet. Its own Wi-Fi on this band moves to channel ${bss.channel ?: "the same"}, " +
                 "so devices may drop off for a moment. If the app cannot reach the router afterwards, the router undoes this within 2 minutes."
         ))
     }
 
-    /** [section] identifies the link on screen; the delete itself removes client links only (mode sta). */
-    @Suppress("UNUSED_PARAMETER")
+    /** Removes the targeted client [section] and cleans up the app's `wwan` network/zone entry. */
     fun disconnect(section: String, ssid: String, firewall: UciConfig, network: UciConfig): PlanResult {
-        val ops = mutableListOf<UciOp>(UciOp.DeleteWhere("wireless", "wifi-iface", mapOf("mode" to "sta")))
+        val sec = section.trim()
+        if (sec.isEmpty()) return PlanResult.Invalid("Unknown client link.")
+        val ops = mutableListOf<UciOp>(UciOp.Delete("wireless", sec))
         if (network.byId(CLIENT_NETWORK) != null) ops += UciOp.Delete("network", CLIENT_NETWORK)
         firewall.ofType("zone").firstOrNull { CLIENT_NETWORK in it.list("network") }?.let { z ->
             ops += UciOp.Set("firewall", z.id, mapOf("network" to z.list("network") - CLIENT_NETWORK))
@@ -205,6 +265,7 @@ object WifiRadio {
             title = "Disconnect from \"$ssid\"?",
             lines = listOf(ChangeLine("Network", ssid, "None")),
             ops = ops,
+            reloadFirewall = true,
             longWait = true,
             note = "The router stops using \"$ssid\". If that was its only internet, it has none until it is connected again."
         ))

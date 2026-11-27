@@ -22,9 +22,13 @@ object Conntrack {
         val origBytes: Long,
         val replySrc: String,
         val replyDst: String,
-        val replyBytes: Long
+        val replyBytes: Long,
+        val flowId: String = "",
+        val replySport: String = "",
+        val replyDport: String = ""
     ) {
-        val key: String get() = "$l3|$proto|$origSrc|$origSport|$origDst|$origDport"
+        val key: String
+            get() = "$l3|$proto|$origSrc|$origSport|$origDst|$origDport|$flowId|$replySrc|$replySport|$replyDst|$replyDport"
     }
 
     private val whitespace = Regex("""\s+""")
@@ -35,23 +39,43 @@ object Conntrack {
     fun parse(text: String): List<Flow>? {
         val flows = mutableListOf<Flow>()
         for (line in text.lineSequence()) {
-            val parts = line.trimStart().split(whitespace, limit = 4)
+            val trimmed = line.trimStart()
+            if (trimmed.isEmpty()) continue
+            val parts = trimmed.split(whitespace, limit = 4)
             if (parts[0] != "ipv4" && parts[0] != "ipv6") continue
             val starts = source.findAll(line).take(2).map { it.range.first }.toList()
-            if (parts.size < 4 || starts.size != 2) return null
+            if (parts.size < 4 || starts.size != 2) continue
             val original = tuple(line.substring(starts[0], starts[1]))
             val reply = tuple(line.substring(starts[1]))
+            val origSrc = original["src"] ?: continue
+            val origDst = original["dst"] ?: continue
+            val origBytes = original["bytes"].byteCount() ?: continue
+            val replySrc = reply["src"] ?: continue
+            val replyDst = reply["dst"] ?: continue
+            val replyBytes = reply["bytes"].byteCount() ?: continue
+            val idParts = listOfNotNull(
+                original["type"]?.let { "t=$it" },
+                original["code"]?.let { "c=$it" },
+                original["id"]?.let { "id=$it" },
+                reply["id"]?.takeIf { it != original["id"] }?.let { "rid=$it" },
+                original["srckey"]?.let { "sk=$it" },
+                original["dstkey"]?.let { "dk=$it" },
+                reply["zone"]?.let { "z=$it" }
+            )
             flows += Flow(
                 l3 = parts[0],
                 proto = parts[2],
-                origSrc = original.getValue("src"),
-                origDst = original["dst"] ?: return null,
+                origSrc = origSrc,
+                origDst = origDst,
                 origSport = original["sport"].orEmpty(),
                 origDport = original["dport"].orEmpty(),
-                origBytes = original["bytes"].byteCount() ?: return null,
-                replySrc = reply.getValue("src"),
-                replyDst = reply["dst"] ?: return null,
-                replyBytes = reply["bytes"].byteCount() ?: return null
+                origBytes = origBytes,
+                replySrc = replySrc,
+                replyDst = replyDst,
+                replyBytes = replyBytes,
+                flowId = idParts.joinToString("/"),
+                replySport = reply["sport"].orEmpty(),
+                replyDport = reply["dport"].orEmpty()
             )
         }
         return flows.takeIf { it.isNotEmpty() || text.isBlank() }

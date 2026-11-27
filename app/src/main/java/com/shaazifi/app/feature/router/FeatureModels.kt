@@ -152,28 +152,45 @@ class LoadHolder<T>(
     private var demo: T? = null,
     private val refreshMs: Long = 0L
 ) {
+    companion object {
+        /** Failed live refreshes in a row before a loaded screen is replaced by Unreachable. */
+        const val MAX_STALE_REFRESHES = 3
+    }
+
     private val _state = MutableStateFlow<LoadState<T>>(LoadState.Loading)
     val state: StateFlow<LoadState<T>> = _state.asStateFlow()
 
     private val readLock = Mutex()
+    private var staleRefreshes = 0
 
     suspend fun refresh() = readLock.withLock {
         demo?.let {
             _state.value = LoadState.DemoData(it)
             return@withLock
         }
+        val current = _state.value
         _state.value = try {
-            LoadState.Loaded(load())
+            val loaded = load()
+            staleRefreshes = 0
+            LoadState.Loaded(loaded)
         } catch (e: CancellationException) {
             throw e
         } catch (e: FeatureLoadException.SessionExpired) {
+            staleRefreshes = 0
             LoadState.SessionExpired
         } catch (e: FeatureLoadException.NotPermitted) {
+            staleRefreshes = 0
             LoadState.NotPermitted
         } catch (e: FeatureLoadException.NotInstalled) {
+            staleRefreshes = 0
             LoadState.NotInstalled
         } catch (e: FeatureLoadException.Unreachable) {
-            LoadState.Unreachable
+            if (current is LoadState.Loaded) {
+                staleRefreshes++
+                if (staleRefreshes < MAX_STALE_REFRESHES) current else LoadState.Unreachable
+            } else {
+                LoadState.Unreachable
+            }
         }
     }
 

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import java.util.Locale
 
@@ -65,11 +66,11 @@ object FeatureMappers {
         }
     }
 
-    fun bandLabel(band: String?): String = when (band?.lowercase()) {
-        "2g" -> "2.4 GHz"
-        "5g" -> "5 GHz"
-        "6g" -> "6 GHz"
-        "60g" -> "60 GHz"
+    fun bandLabel(band: String?): String = when (band?.trim()?.lowercase()) {
+        "2g", "2.4g", "2.4 ghz" -> "2.4 GHz"
+        "5g", "5 ghz" -> "5 GHz"
+        "6g", "6 ghz" -> "6 GHz"
+        "60g", "60 ghz" -> "60 GHz"
         else -> "Wi-Fi"
     }
 
@@ -112,8 +113,11 @@ object FeatureMappers {
         for ((id, element) in reply) {
             val radio = element.obj() ?: continue
             val cfg = radio["config"].obj()
-            val band = bandLabel(cfg?.get("band").str())
-            val firstIwinfo = radio["interfaces"].arr()?.firstOrNull().obj()?.get("iwinfo").obj()
+            val firstIwinfo = radio["interfaces"].arr()?.firstOrNull().obj()?.get("iwinfo").obj() ?: radio["iwinfo"].obj()
+            val freq = (firstIwinfo?.get("frequency") as? JsonPrimitive)?.intOrNull
+                ?: ((radio["iwinfo"].obj()?.get("frequency")) as? JsonPrimitive)?.intOrNull
+            val rawBand = cfg?.get("band").str()?.takeIf { it.isNotBlank() } ?: com.shaazifi.app.feature.router.WifiRadio.bandFromFrequency(freq)
+            val band = bandLabel(rawBand)
             radios += WifiRadio(
                 id = id,
                 band = band,
@@ -215,16 +219,26 @@ object FeatureMappers {
         )
     }
 
-    private fun radioForm(r: RadioInfo) = FeatureForm(
-        title = "Channel, width and power",
-        fields = listOf(
-            FormField("channel", "Channel", initial = r.channel, hint = (listOf("auto") + r.channels.map { it.toString() }).joinToString(", ")),
-            FormField("width", "Width", initial = r.htmode, hint = com.shaazifi.app.feature.router.WifiRadio.widthChoices(r).joinToString(", ")),
-            FormField("country", "Country (two letters)", initial = r.country),
-            FormField("power", "Transmit power (dBm)", initial = r.txpower ?: "default", hint = (listOf("default") + r.powers.map { it.toString() }).joinToString(", "))
-        ),
-        submitLabel = "Save radio"
-    ) { v -> com.shaazifi.app.feature.router.WifiRadio.radioSettings(r, v["channel"].orEmpty(), v["width"].orEmpty(), v["country"].orEmpty(), v["power"].orEmpty()) }
+    private fun radioForm(r: RadioInfo): FeatureForm {
+        val channelChoices = listOf("auto") + r.channels.map { it.toString() }
+        val widthChoices = com.shaazifi.app.feature.router.WifiRadio.widthChoices(r)
+        val countryChoices = if (r.country.isNotBlank() && r.country !in r.countries) {
+            listOf(r.country) + r.countries
+        } else {
+            r.countries
+        }
+        val powerChoices = listOf("default") + r.powers.map { it.toString() }
+        return FeatureForm(
+            title = "Channel, width and power",
+            fields = listOf(
+                FormField("channel", "Channel", initial = r.channel, hint = channelChoices.joinToString(", "), choices = channelChoices),
+                FormField("width", "Width", initial = r.htmode, hint = widthChoices.joinToString(", "), choices = widthChoices),
+                FormField("country", "Country (two letters)", initial = r.country, choices = countryChoices),
+                FormField("power", "Transmit power (dBm)", initial = r.txpower ?: "default", hint = powerChoices.joinToString(", "), choices = powerChoices)
+            ),
+            submitLabel = "Save radio"
+        ) { v -> com.shaazifi.app.feature.router.WifiRadio.radioSettings(r, v["channel"].orEmpty(), v["width"].orEmpty(), v["country"].orEmpty(), v["power"].orEmpty()) }
+    }
 
     private fun wifiForm(n: WifiIface, title: String = "Change name or password") = FeatureForm(
         title = title,
@@ -235,12 +249,30 @@ object FeatureMappers {
         submitLabel = "Save Wi-Fi"
     ) { v -> FeatureChanges.wifiNetwork(n.section!!, n.ssid, v["ssid"].orEmpty(), v["key"].orEmpty(), n.encryption) }
 
+    /** Offered only when the router has no guest network: the radio list comes from the reply itself. */
+    private fun createGuestForm(radios: List<String>) = FeatureForm(
+        title = "Create a guest network",
+        fields = listOf(
+            FormField("radio", "Wi-Fi radio", initial = radios.firstOrNull().orEmpty(), hint = radios.joinToString(", ").ifBlank { null }, choices = radios),
+            FormField("ssid", "Guest network name", hint = "Home-Guest"),
+            FormField("password", "Guest password (8 to 63 characters)", secret = true),
+            FormField("encryption", "Security", initial = "sae-mixed", choices = listOf("sae-mixed", "psk2", "sae"))
+        ),
+        submitLabel = "Create guest network"
+    ) { v ->
+        val radio = v["radio"].orEmpty().trim()
+        FeatureChanges.createGuest("guest_${radio}", radio, v["ssid"].orEmpty(), v["password"].orEmpty(), v["encryption"].orEmpty())
+    }
+
     fun guest(reply: JsonObject): FeatureView {
-        val guests = parseWireless(reply).second.filter { it.mode == "ap" && isGuest(it) }
+        val parsed = parseWireless(reply)
+        val radios = parsed.first.map { it.id }.filter { com.shaazifi.app.feature.router.WifiRadio.isRadioName(it) }
+        val guests = parsed.second.filter { it.mode == "ap" && isGuest(it) }
         if (guests.isEmpty()) {
             return FeatureView(
                 "No guest network yet. Visitors can get internet without your main password once one is created.",
-                OFF
+                OFF,
+                forms = listOf(createGuestForm(radios))
             )
         }
         val anyOn = guests.any { !it.disabled }
@@ -339,7 +371,7 @@ object FeatureMappers {
             forms = if (wan != null) listOf(FeatureForm(
                 title = "Change the internet connection",
                 fields = listOf(
-                    FormField("proto", "Type: dhcp, static or pppoe", initial = current),
+                    FormField("proto", "Type: dhcp, static or pppoe", initial = current, choices = listOf("dhcp", "static", "pppoe")),
                     FormField("ip", "Address (static only)", initial = wan.opt("ipaddr").orEmpty()),
                     FormField("mask", "Subnet mask (static only)", initial = wan.opt("netmask") ?: "255.255.255.0"),
                     FormField("gw", "Gateway (static only)", initial = wan.opt("gateway").orEmpty()),
@@ -349,7 +381,7 @@ object FeatureMappers {
                 ),
                 submitLabel = "Save internet settings"
             ) { v ->
-                FeatureChanges.wan(current, v["proto"].orEmpty(), v["ip"].orEmpty(), v["mask"].orEmpty(), v["gw"].orEmpty(), v["dns"].orEmpty(), v["user"].orEmpty(), v["pass"].orEmpty())
+                FeatureChanges.wan(current, v["proto"].orEmpty(), v["ip"].orEmpty(), v["mask"].orEmpty(), v["gw"].orEmpty(), v["dns"].orEmpty(), v["user"].orEmpty(), v["pass"].orEmpty(), existingWan = wan)
             }) else emptyList()
         )
     }
@@ -359,6 +391,7 @@ object FeatureMappers {
         val raw = lan?.opt("ipaddr") ?: ""
         val ip = raw.substringBefore('/')
         val prefix = raw.substringAfter('/', "").toIntOrNull()
+        val prefixBits = prefix ?: lan?.opt("netmask")?.let { FeatureChanges.maskBits(it) } ?: 24
         val mask = prefix?.let { prefixToMask(it) } ?: lan?.opt("netmask") ?: "255.255.255.0"
         val pool = dhcp?.sections?.firstOrNull { it.type == "dhcp" && (it.opt("interface") == "lan" || it.id == "lan") }
         val dhcpOn = pool != null && !pool.flag("ignore")
@@ -391,7 +424,7 @@ object FeatureMappers {
                     FormField("lease", "Lease time (30m, 12h, 2d)", initial = pool.opt("leasetime") ?: "12h")
                 ),
                 submitLabel = "Save pool"
-            ) { v -> FeatureChanges.dhcpPool(pool.id, v["start"].orEmpty(), v["limit"].orEmpty(), v["lease"].orEmpty()) }) else emptyList()
+            ) { v -> FeatureChanges.dhcpPool(pool.id, v["start"].orEmpty(), v["limit"].orEmpty(), v["lease"].orEmpty(), prefixBits) }) else emptyList()
         )
     }
 
@@ -496,24 +529,27 @@ object FeatureMappers {
                 }, emptyText = "No traffic rules.")
             ).let { secs ->
                 // Each zone's policies can be changed in the Zones card (phase 4, with automatic undo).
+                val policies = listOf("ACCEPT", "REJECT", "DROP")
                 val zoneForms = zones.map { z ->
                     FeatureForm("Change zone ${z.opt("name") ?: z.id}", listOf(
-                        FormField("input", "Into the router (ACCEPT, REJECT, DROP)", initial = z.opt("input") ?: "ACCEPT"),
-                        FormField("output", "From the router", initial = z.opt("output") ?: "ACCEPT"),
-                        FormField("forward", "Through the router", initial = z.opt("forward") ?: "REJECT"),
-                        FormField("masq", "Masquerading (yes or no)", initial = if (z.flag("masq")) "yes" else "no")
+                        FormField("input", "Into the router (ACCEPT, REJECT, DROP)", initial = z.opt("input") ?: "ACCEPT", choices = policies),
+                        FormField("output", "From the router", initial = z.opt("output") ?: "ACCEPT", choices = policies),
+                        FormField("forward", "Through the router", initial = z.opt("forward") ?: "REJECT", choices = policies),
+                        FormField("masq", "Masquerading (yes or no)", initial = if (z.flag("masq")) "yes" else "no", choices = listOf("yes", "no"))
                     ), "Save zone") { v -> Phase4.zoneEdit(z, v["input"].orEmpty(), v["output"].orEmpty(), v["forward"].orEmpty(), v["masq"].orEmpty()) }
                 }
                 listOf(secs[0].copy(moreForms = zoneForms)) + secs.drop(1)
             },
-            forms = listOf(FeatureForm("Add a traffic rule", listOf(
-                FormField("name", "Name"),
-                FormField("src", "From zone", hint = zones.mapNotNull { it.opt("name") }.joinToString(", ")),
-                FormField("dest", "To zone (empty = the router itself)"),
-                FormField("proto", "Protocol", initial = "tcp udp", hint = "tcp, udp, icmp, all"),
-                FormField("dest_port", "Port (optional)", hint = "22 or 8000-8100"),
-                FormField("target", "Action", initial = "REJECT", hint = "ACCEPT, REJECT, DROP")
-            ), "Add rule") { v -> Phase4.addRule(v, zones.mapNotNull { it.opt("name") }.toSet()) })
+            forms = zones.mapNotNull { it.opt("name") }.distinct().let { zoneNames ->
+                listOf(FeatureForm("Add a traffic rule", listOf(
+                    FormField("name", "Name"),
+                    FormField("src", "From zone", hint = zoneNames.joinToString(", "), choices = zoneNames),
+                    FormField("dest", "To zone (empty = the router itself)", choices = zoneNames),
+                    FormField("proto", "Protocol", initial = "tcp udp", hint = "tcp, udp, icmp, all", choices = listOf("tcp", "udp", "icmp", "all"), multi = true),
+                    FormField("dest_port", "Port (optional)", hint = "22 or 8000-8100"),
+                    FormField("target", "Action", initial = "REJECT", hint = "ACCEPT, REJECT, DROP", choices = listOf("ACCEPT", "REJECT", "DROP"))
+                ), "Add rule") { v -> Phase4.addRule(v, zoneNames.toSet()) })
+            }
         )
     }
 
@@ -533,11 +569,11 @@ object FeatureMappers {
                     sub = r.opt("metric")?.let { "metric $it" },
                     toggle = on,
                     onToggle = { Phase4.routeEnabled(r.id, target, !on) },
-                    extra = RowAction("Remove") { Phase4.removeRoute(iface, target) }
+                    extra = RowAction("Remove") { Phase4.removeRoute(iface, target, gateway = r.opt("gateway"), metric = r.opt("metric")) }
                 )
             }, emptyText = "No static routes.")),
             forms = listOf(FeatureForm("Add a route", listOf(
-                FormField("interface", "Interface", hint = ifaces.joinToString(", ")),
+                FormField("interface", "Interface", hint = ifaces.joinToString(", "), choices = ifaces.toList().sorted()),
                 FormField("target", "Network (address/bits)", hint = "10.8.0.0/24"),
                 FormField("gateway", "Gateway (optional)", hint = "192.168.1.2"),
                 FormField("metric", "Metric (optional)", numeric = true)
@@ -727,27 +763,78 @@ object FeatureMappers {
     }
 
     /** `tailscale status --json` fields as read by UnTangled (src/lib/tailscale.ts): BackendState, Self, Peer, CurrentTailnet. */
-    fun tailscale(stdout: String?): FeatureView {
+    fun tailscale(stdout: String?, exitCode: Int = 0, stderr: String = ""): FeatureView {
         val json = stdout?.let { runCatching { Json.parseToJsonElement(it) }.getOrNull() }.obj()
-            ?: return FeatureView("Tailscale did not report a status.", ViewPill("Unknown", PillTone.Off))
+        if (json == null) {
+            if (exitCode != 0) {
+                return FeatureView(
+                    summary = "Tailscale is installed on the router, but the daemon is stopped.",
+                    pill = ViewPill("Stopped", PillTone.Off),
+                    note = stderr.trim().takeIf { it.isNotEmpty() }
+                )
+            }
+            return FeatureView("Tailscale did not report a status.", ViewPill("Unknown", PillTone.Off))
+        }
         val state = json["BackendState"].str() ?: "Unknown"
         val self = json["Self"].obj()
         val peers = json["Peer"].obj()?.values?.mapNotNull { it.obj() }.orEmpty()
         val connected = state.equals("Running", ignoreCase = true)
+        val stopped = state.equals("Stopped", ignoreCase = true) || state.equals("NoState", ignoreCase = true)
+        val needsLogin = state.equals("NeedsLogin", ignoreCase = true)
+        val pill = when {
+            connected -> ViewPill("Connected", PillTone.Ok)
+            stopped -> ViewPill("Stopped", PillTone.Off)
+            needsLogin -> ViewPill("Sign in needed", PillTone.Warn)
+            else -> ViewPill(state, PillTone.Warn)
+        }
+        val authUrl = json["AuthURL"].str()?.takeIf { it.isNotBlank() }
+        val exitNodeStatus = json["ExitNodeStatus"].obj()
+        val exitPeer = peers.firstOrNull { it["ExitNode"].bool() == true }
+        val selfIps = self?.get("TailscaleIPs").strings().toSet()
+        val primaryRoutes = self?.get("PrimaryRoutes").strings()
+        val allowedIps = self?.get("AllowedIPs").strings()
+        val advertisedRoutes = (primaryRoutes.ifEmpty { allowedIps })
+            .filter { r ->
+                val bare = r.substringBefore('/')
+                bare !in selfIps && r != "0.0.0.0/0" && r != "::/0"
+            }
+            .distinct()
+        val offersExitNode = self?.get("ExitNodeOption").bool() == true ||
+            primaryRoutes.any { it == "0.0.0.0/0" || it == "::/0" } ||
+            allowedIps.any { it == "0.0.0.0/0" || it == "::/0" }
+        val exitRow = when {
+            exitPeer != null || exitNodeStatus != null -> {
+                val exitName = exitPeer?.get("HostName").str()
+                    ?: exitNodeStatus?.get("TailscaleIPs").strings().firstOrNull()
+                    ?: exitNodeStatus?.get("ID").str()
+                    ?: "Configured"
+                val online = exitPeer?.get("Online").bool() ?: (exitNodeStatus?.get("Online").bool() ?: true)
+                ViewRow("Exit node", exitName, pill = if (online) ViewPill("Active", PillTone.Ok) else ViewPill("Offline", PillTone.Warn))
+            }
+            offersExitNode -> ViewRow("Exit node", "Advertising", pill = ViewPill("Active", PillTone.Ok))
+            else -> null
+        }
         return FeatureView(
             summary = "A private network that reaches your home from anywhere.",
-            pill = if (connected) ViewPill("Connected", PillTone.Ok) else ViewPill(state, PillTone.Warn),
+            pill = pill,
             sections = listOf(
                 ViewSection("This router", listOfNotNull(
                     ViewRow("Name", self?.get("HostName").str() ?: "Unknown"),
                     ViewRow("Tailscale address", self?.get("TailscaleIPs").strings().firstOrNull() ?: "None", mono = true),
-                    json["CurrentTailnet"].obj()?.get("Name").str()?.let { ViewRow("Network", it) }
+                    json["CurrentTailnet"].obj()?.get("Name").str()?.let { ViewRow("Network", it) },
+                    authUrl?.let { ViewRow("AuthURL", it, sub = "Open to sign in", mono = true, pill = ViewPill("Sign in", PillTone.Warn)) },
+                    exitRow,
+                    advertisedRoutes.takeIf { it.isNotEmpty() }?.let { ViewRow("Advertised routes", it.joinToString(", "), mono = true) }
                 )),
                 ViewSection("Machines", peers.map { p ->
+                    val sub = listOfNotNull(
+                        p["OS"].str(),
+                        if (p["ExitNode"].bool() == true) "Exit node" else if (p["ExitNodeOption"].bool() == true) "Offers exit node" else null
+                    ).joinToString(" · ").ifBlank { null }
                     ViewRow(
                         p["HostName"].str() ?: "Machine",
                         p["TailscaleIPs"].strings().firstOrNull() ?: "",
-                        sub = p["OS"].str(),
+                        sub = sub,
                         mono = true,
                         pill = if (p["Online"].bool() == true) ViewPill("Online", PillTone.Ok) else ViewPill("Offline", PillTone.Off)
                     )
@@ -895,41 +982,104 @@ object FeatureMappers {
         )
     }
 
-    fun usage(vnstatOut: String?, nlbwOut: String?, wanDevice: String?, nameByMac: Map<String, String>): FeatureView {
+    fun usage(
+        vnstatOut: String?,
+        nlbwOut: String?,
+        wanDevice: String?,
+        nameByMac: Map<String, String>,
+        vnstatResult: ExecResult? = null,
+        nlbwResult: ExecResult? = null,
+        todayDate: Triple<Int, Int, Int>? = null
+    ): FeatureView {
         val sections = mutableListOf<ViewSection>()
         var pill: ViewPill? = null
-        val vn = vnstatOut?.let { runCatching { Json.parseToJsonElement(it) }.getOrNull() }.obj()
+        val vnText = vnstatResult?.stdout ?: vnstatOut
+        val vn = vnText?.let { runCatching { Json.parseToJsonElement(it) }.getOrNull() }.obj()
         if (vn == null) {
-            sections += ViewSection("Internet usage", emptyList(), emptyText = "Needs the vnstat package on the router.")
+            val emptyMsg = when {
+                vnstatResult != null && vnstatResult.code != 0 && vnstatResult.code != 127 -> {
+                    val detail = vnstatResult.stderr.trim().takeIf { it.isNotEmpty() }?.let { ": $it" } ?: "."
+                    "vnstat returned an error (exit ${vnstatResult.code})$detail"
+                }
+                else -> "Needs the vnstat package on the router."
+            }
+            sections += ViewSection("Internet usage", emptyList(), emptyText = emptyMsg)
         } else {
+            val jsonVersion = vn["jsonversion"].str()?.toIntOrNull()
+                ?: (vn["jsonversion"] as? JsonPrimitive)?.intOrNull
+                ?: 2
+            val scale = if (jsonVersion == 1) 1024L else 1L
             val ifaces = vn["interfaces"].arr()?.mapNotNull { it.obj() }.orEmpty()
             val pick = ifaces.firstOrNull { it["name"].str() == wanDevice } ?: ifaces.firstOrNull { it["name"].str() != "lo" }
             val t = pick?.get("traffic").obj()
             val days = (t?.get("day") ?: t?.get("days")).arr()?.mapNotNull { it.obj() }.orEmpty()
             val months = (t?.get("month") ?: t?.get("months")).arr()?.mapNotNull { it.obj() }.orEmpty()
+            fun dateTriple(o: JsonObject): Triple<Int, Int, Int>? {
+                val d = o["date"].obj() ?: o
+                val y = d["year"].num().toInt()
+                val m = d["month"].num().toInt()
+                val day = d["day"].num().toInt()
+                return if (y > 0 && m > 0) Triple(y, m, day) else null
+            }
             fun label(o: JsonObject, withDay: Boolean): String {
                 val d = o["date"].obj() ?: o
                 val m = d["month"].num().toInt()
                 return if (withDay) String.format(Locale.US, "%02d/%02d", d["day"].num().toInt(), m) else "${d["year"].num().toInt()}-${String.format(Locale.US, "%02d", m)}"
             }
-            fun total(o: JsonObject) = o["rx"].num().toLong() + o["tx"].num().toLong()
-            val today = days.lastOrNull()
-            val month = months.lastOrNull()
+            fun rxBytes(o: JsonObject): Long = (o["rx"].num() * scale).toLong().coerceAtLeast(0L)
+            fun txBytes(o: JsonObject): Long = (o["tx"].num() * scale).toLong().coerceAtLeast(0L)
+            fun total(o: JsonObject): Long {
+                val r = rxBytes(o)
+                return r + txBytes(o).coerceAtMost(Long.MAX_VALUE - r)
+            }
+            val today = if (todayDate != null) days.firstOrNull { dateTriple(it) == todayDate } else days.lastOrNull()
+            val month = if (todayDate != null) {
+                months.firstOrNull { o ->
+                    val d = dateTriple(o)
+                    d != null && d.first == todayDate.first && d.second == todayDate.second
+                }
+            } else {
+                months.lastOrNull()
+            }
             pill = today?.let { ViewPill("Today ${bytes(total(it))}", PillTone.Off) }
+                ?: if (todayDate != null && days.isNotEmpty()) ViewPill("Today 0 B", PillTone.Off) else null
+            val todayRow = today?.let {
+                ViewRow("Today", bytes(total(it)), sub = "↓ ${bytes(rxBytes(it))} · ↑ ${bytes(txBytes(it))}", mono = true)
+            } ?: if (todayDate != null) {
+                ViewRow("Today", bytes(0L), sub = "No traffic recorded today", mono = true)
+            } else null
             sections += ViewSection("Internet usage · ${pick?.get("name").str() ?: "?"}", listOfNotNull(
-                today?.let { ViewRow("Today", bytes(total(it)), sub = "↓ ${bytes(it["rx"].num().toLong())} · ↑ ${bytes(it["tx"].num().toLong())}", mono = true) },
-                month?.let { ViewRow("This month", bytes(total(it)), sub = "↓ ${bytes(it["rx"].num().toLong())} · ↑ ${bytes(it["tx"].num().toLong())}", mono = true) }
+                todayRow,
+                month?.let { ViewRow("This month", bytes(total(it)), sub = "↓ ${bytes(rxBytes(it))} · ↑ ${bytes(txBytes(it))}", mono = true) }
             ))
             sections += ViewSection("Last days", days.takeLast(7).reversed().map { ViewRow(label(it, true), bytes(total(it)), mono = true) }, emptyText = "No daily history yet.")
         }
-        val data = parseDeviceUsage(nlbwOut)
+        val nlText = nlbwResult?.stdout ?: nlbwOut
+        val data = parseDeviceUsage(nlText)
         if (data == null) {
-            sections += ViewSection("By device", emptyList(), emptyText = "Needs the nlbwmon package on the router.")
+            val emptyMsg = when {
+                nlbwResult != null && nlbwResult.code != 0 && nlbwResult.code != 127 -> {
+                    val detail = nlbwResult.stderr.trim().takeIf { it.isNotEmpty() }?.let { ": $it" } ?: "."
+                    "nlbwmon returned an error (exit ${nlbwResult.code})$detail"
+                }
+                else -> "Needs the nlbwmon package on the router."
+            }
+            sections += ViewSection("By device", emptyList(), emptyText = emptyMsg)
         } else {
-            val rows = data.filter { it.total > 0 }.sortedByDescending { it.total }
+            val grouped = data.groupBy { row -> if (deviceMac.matches(row.mac)) row.mac else row.ip.ifBlank { row.mac } }
+                .values
+                .map { group ->
+                    val first = group.first()
+                    val ip = group.map { it.ip }.firstOrNull { it.contains('.') } ?: first.ip
+                    val rxSum = group.fold(0L) { acc, r -> acc + r.rx.coerceAtMost(Long.MAX_VALUE - acc) }
+                    val txSum = group.fold(0L) { acc, r -> acc + r.tx.coerceAtMost(Long.MAX_VALUE - acc) }
+                    DeviceUsage(first.mac, ip, rxSum, txSum)
+                }
+            val rows = grouped.filter { it.total > 0 }.sortedByDescending { it.total }
             sections += ViewSection("By device", rows.take(15).map { row ->
                 val name = nameByMac[row.mac] ?: row.ip.ifBlank { row.mac }
-                ViewRow(name, bytes(row.total), sub = "${row.ip} · ↓ ${bytes(row.rx)} · ↑ ${bytes(row.tx)}", mono = true)
+                val sub = listOfNotNull(row.ip.takeIf { it.isNotBlank() }, "↓ ${bytes(row.rx)} · ↑ ${bytes(row.tx)}").joinToString(" · ")
+                ViewRow(name, bytes(row.total), sub = sub, mono = true)
             }, emptyText = "No per-device data yet.")
         }
         val totals = data.orEmpty().filter { deviceMac.matches(it.mac) }.groupBy { it.mac }.mapValues { (_, rows) ->
@@ -1002,17 +1152,23 @@ object FeatureMappers {
     }
 
     private val NOTABLE = listOf(
-        "luci", "untangled", "untangled-full", "adguardhome", "tailscale", "vnstat", "nlbwmon", "sqm-scripts", "mwan3",
-        "ddns-scripts", "miniupnpd", "etherwake", "wireguard-tools", "openvpn-openssl", "adblock", "banip", "minidlna", "ksmbd-server"
+        "luci", "untangled", "untangled-full", "adguardhome", "tailscale", "vnstat", "vnstat2", "nlbwmon", "sqm-scripts", "mwan3",
+        "ddns-scripts", "miniupnpd", "etherwake", "wireguard-tools", "openvpn-openssl", "adblock", "banip", "minidlna", "ksmbd-server", "samba4-server"
     )
 
-    /** Package names from `apk list -I` ("name-1.2-r3 arch {origin} (lic) [installed]") or `opkg list-installed` ("name - 1.2"). */
+    /** Package names from `apk info` ("name"), `apk list -I` ("name-1.2-r3 arch {origin} (lic) [installed]") or `opkg list-installed` ("name - 1.2"). */
     fun parsePackages(output: String): List<String> = output.lines().mapNotNull { line ->
         val l = line.trim()
         if (l.isEmpty()) return@mapNotNull null
         if (" - " in l) return@mapNotNull l.substringBefore(" - ").trim()
         val token = l.substringBefore(' ')
-        Regex("^(.+?)-\\d").find(token)?.groupValues?.get(1) ?: token
+        if (' ' in l) {
+            Regex("^(.+?)-\\d[^-]*-r\\d+$").find(token)?.groupValues?.get(1)
+                ?: Regex("^(.+?)-\\d[^-]*$").find(token)?.groupValues?.get(1)
+                ?: token
+        } else {
+            token
+        }
     }.distinct()
 
     fun software(output: String?): FeatureView {
@@ -1053,7 +1209,13 @@ object FeatureMappers {
     private fun pct(used: Double, total: Double): Int = if (total <= 0.0) 0 else Math.round(used / total * 100.0).toInt()
     private fun mb(bytes: Double): Long = Math.round(bytes / 1_048_576.0)
 
-    fun health(info: JsonObject, cpuPct: Int?): FeatureView {
+    fun health(
+        info: JsonObject,
+        cpuPct: Int?,
+        thermals: List<ThermalSensor> = emptyList(),
+        board: JsonObject? = null,
+        offloading: FlowOffloadingStatus? = null
+    ): FeatureView {
         val mem = info["memory"].obj()
         val memTotal = mem?.get("total").num()
         val memAvail = mem?.get("available")?.let { (it as? JsonPrimitive)?.doubleOrNull } ?: mem?.get("free").num()
@@ -1085,17 +1247,62 @@ object FeatureMappers {
             root?.let { (p, s) -> add(ViewRow("Storage", "$p%", sub = s, pill = bar(p))) }
             add(ViewRow("Running for", uptimeText(info["uptime"].num().toLong())))
         }
+        val release = board?.get("release").obj()
+        val firmware = release?.get("description").str()?.takeIf { it.isNotBlank() }
+            ?: listOfNotNull(
+                release?.get("distribution").str()?.takeIf { it.isNotBlank() },
+                release?.get("version").str()?.takeIf { it.isNotBlank() }
+            ).joinToString(" ").takeIf { it.isNotBlank() }
+        val kernel = board?.get("kernel").str()?.takeIf { it.isNotBlank() }
         val details = buildList {
             info["load"].arr()?.let { l -> add(ViewRow("Load (1, 5, 15 min)", loadText(l.map { it.num() }), mono = true, detail = true)) }
             tmp?.let { (p, s) -> add(ViewRow("Temporary files", "$p%", sub = s, detail = true)) }
             swap?.let { add(ViewRow("Swap", "$it%", detail = true)) }
+            firmware?.let { add(ViewRow("Firmware", it, mono = true, detail = true)) }
+            kernel?.let { add(ViewRow("Kernel", it, mono = true, detail = true)) }
+            offloading?.let { flow ->
+                val (valText, subText, flowPill) = when {
+                    flow.hardware -> Triple("Hardware (PPE)", "Software and hardware PPE active", ViewPill("On", PillTone.Ok))
+                    flow.software -> Triple("Software only", "Hardware PPE is off", ViewPill("Software", PillTone.Ok))
+                    else -> Triple("Off", "Software and hardware offloading disabled", OFF)
+                }
+                add(ViewRow("Hardware flow offloading", valText, sub = subText, pill = flowPill, detail = true))
+            }
         }
+        val thermalRows = thermals.map { sensor ->
+            val sub = listOfNotNull(
+                sensor.maxCelsius?.let { String.format(Locale.ROOT, "Max %.0f°C", it) },
+                sensor.critCelsius?.let { String.format(Locale.ROOT, "Crit %.0f°C", it) }
+            ).joinToString(" · ").ifBlank { null }
+            val tempPill = when {
+                sensor.tempCelsius >= 85.0 -> ViewPill("Hot", PillTone.Bad)
+                sensor.tempCelsius >= 75.0 -> ViewPill("Warm", PillTone.Warn)
+                else -> null
+            }
+            ViewRow(sensor.label, String.format(Locale.ROOT, "%.1f°C", sensor.tempCelsius), sub = sub, mono = true, pill = tempPill)
+        }
+        val hot = thermals.any { it.tempCelsius >= 85.0 }
+        val warm = thermals.any { it.tempCelsius >= 75.0 }
         val low = memPct >= 90 || (root?.first ?: 0) >= 90
+        val overallPill = when {
+            hot -> ViewPill("Hot", PillTone.Bad)
+            low -> ViewPill("Running low", PillTone.Warn)
+            warm -> ViewPill("Warm", PillTone.Warn)
+            else -> ViewPill("Healthy", PillTone.Ok)
+        }
+        val sections = buildList {
+            add(ViewSection("Now", rows + details))
+            if (thermalRows.isNotEmpty()) add(ViewSection("Thermals", thermalRows))
+        }
         return FeatureView(
             summary = "How hard the router is working. Updates every few seconds while open.",
-            pill = if (low) ViewPill("Running low", PillTone.Warn) else ViewPill("Healthy", PillTone.Ok),
-            sections = listOf(ViewSection("Now", rows + details)),
-            note = if (low) "Memory or storage is nearly full. Restarting the router or removing unused packages frees space." else null
+            pill = overallPill,
+            sections = sections,
+            note = when {
+                hot -> "Router temperature is high. Check ventilation and airflow around the router."
+                low -> "Memory or storage is nearly full. Restarting the router or removing unused packages frees space."
+                else -> null
+            }
         )
     }
 
@@ -1163,24 +1370,44 @@ object FeatureMappers {
                 pill = onOff(i["up"].bool() == true)
             )
         }
+        val wanDevices = list.filter { it["interface"].str().orEmpty().startsWith("wan") }
+            .flatMap { listOfNotNull(it["device"].str(), it["l3_device"].str()) }.toSet()
+        val bridgeMembers = devices.values.mapNotNull { it.obj() }
+            .flatMap { it["bridge-members"].arr().orEmpty().mapNotNull { m -> m.str() } }
+            .toSet()
+        val hasDsaPorts = devices.keys.any { Regex("^(lan|sw)\\d+$").matches(it) } ||
+            devices.values.mapNotNull { it.obj()?.get("name").str() }.any { Regex("^(lan|sw)\\d+$").matches(it) }
+        val wireless = Regex("^(phy\\d+-|wlan\\d|wl\\d|ath\\d|ra\\d|rai\\d|apcli)")
+        val virtual = Regex("^(tailscale|wg|tun|tap|ppp|pppoe-|gre|ip6|sit|veth|ifb|docker|bond|vlan|6in4|464|dslite|map-|dummy|erspan|teql|miireg|macvlan|vxlan|l2tp|xfrm|ovpn)")
+        fun portKind(name: String, d: JsonObject): PortKind {
+            val devType = d["devtype"].str()?.lowercase()
+            val isDsaConduit = hasDsaPorts && Regex("^eth\\d+$").matches(name) && name !in wanDevices && name !in bridgeMembers
+            return when {
+                devType == "bridge" || name.startsWith("br-") -> PortKind.BRIDGE
+                devType == "wlan" || wireless.containsMatchIn(name) -> PortKind.WIRELESS
+                virtual.containsMatchIn(name) || name.contains('.') || name.contains('@') || isDsaConduit -> PortKind.OTHER
+                name in wanDevices -> PortKind.INTERNET
+                else -> PortKind.LAN
+            }
+        }
         val ports = devices.mapNotNull { (name, el) ->
             val d = el.obj() ?: return@mapNotNull null
             val link = d["link"].obj() ?: return@mapNotNull null
             if (d["flags"].obj()?.get("loopback").bool() == true) return@mapNotNull null
+            val devName = d["name"].str() ?: name
+            if (devName == "lo") return@mapNotNull null
+            val kind = portKind(devName, d)
+            if (kind != PortKind.INTERNET && kind != PortKind.LAN) return@mapNotNull null
             val carrier = link["carrier"].bool() == true
             val st = d["stats"].obj()
             ViewRow(
-                label = d["name"].str() ?: name,
+                label = devName,
                 value = if (carrier) "${link["speed"].num().toLong()} Mb/s ${link["duplex"].str().orEmpty()}".trim() else "Unplugged",
                 sub = st?.let { "↓ ${bytesText(it["rx_bytes"].num())} ↑ ${bytesText(it["tx_bytes"].num())}" },
                 pill = if (carrier) ON else OFF
             )
         }.sortedBy { it.label }
         // Owner feedback: a picture of the ports and links (same data as the rows above).
-        val wanDevices = list.filter { it["interface"].str().orEmpty().startsWith("wan") }
-            .flatMap { listOfNotNull(it["device"].str(), it["l3_device"].str()) }.toSet()
-        val wireless = Regex("^(phy\\d+-|wlan\\d|wl\\d|ath\\d|ra\\d|rai\\d|apcli)")
-        val virtual = Regex("^(tailscale|wg|tun|tap|ppp|gre|ip6|sit|veth|ifb|docker|bond|vlan)")
         val picPorts = devices.mapNotNull { (key, el) ->
             val d = el.obj() ?: return@mapNotNull null
             if (d["flags"].obj()?.get("loopback").bool() == true) return@mapNotNull null
@@ -1188,13 +1415,7 @@ object FeatureMappers {
             if (name == "lo") return@mapNotNull null
             val link = d["link"].obj()
             val st = d["stats"].obj()
-            val kind = when {
-                name in wanDevices -> PortKind.INTERNET
-                name.startsWith("br-") -> PortKind.BRIDGE
-                wireless.containsMatchIn(name) -> PortKind.WIRELESS
-                virtual.containsMatchIn(name) || name.contains('.') -> PortKind.OTHER
-                else -> PortKind.LAN
-            }
+            val kind = portKind(name, d)
             val speed = link?.get("speed").num().toInt().takeIf { it > 0 && (kind == PortKind.INTERNET || kind == PortKind.LAN) }
             NetPort(
                 name = name,

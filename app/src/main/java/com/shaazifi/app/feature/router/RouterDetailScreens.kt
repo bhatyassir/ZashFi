@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -150,14 +151,18 @@ internal fun WifiNetworkScreen(
                 SfList {
                     val section = network.key.section
                     val enabled = network.enabled
-                    if (settings?.form != null && changes != null) {
-                        FoldForm(settings.form.copy(title = "Network name"), changes::submit)
-                        SfDivider()
-                    } else SfListRow("Network name", subtitle = network.name, icon = SfIcons.Pencil, hue = hue)
-                    settings?.moreForms.orEmpty().forEach { form ->
-                        if (changes != null) {
+                    key(network.key) {
+                        if (settings?.form != null && changes != null) {
+                            FoldForm(settings.form.copy(title = "Network name"), changes::submit)
                             SfDivider()
-                            FoldForm(form, changes::submit)
+                        } else SfListRow("Network name", subtitle = network.name, icon = SfIcons.Pencil, hue = hue)
+                        settings?.moreForms.orEmpty().forEach { form ->
+                            if (changes != null) {
+                                SfDivider()
+                                key(form.title) {
+                                    FoldForm(form, changes::submit)
+                                }
+                            }
                         }
                     }
                     if (enabled != null) {
@@ -182,7 +187,7 @@ private fun RouterService.status(): ViewPill = when (running) {
 }
 
 @Composable
-internal fun ServicesScreen(holder: LoadHolder<FeatureView>, changes: ChangeController, onSignInAgain: () -> Unit) {
+internal fun ServicesScreen(holder: LoadHolder<FeatureView>, changes: ChangeController?, onSignInAgain: () -> Unit) {
     var selected by remember { mutableStateOf<String?>(null) }
     LoadStateContent(holder, onSignInAgain) { view, demo ->
         val c = SfTheme.colors
@@ -191,6 +196,7 @@ internal fun ServicesScreen(holder: LoadHolder<FeatureView>, changes: ChangeCont
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             PageHeading("Services", "View and control router services.")
+            if (!demo && changes == null) Note("This login may view services but cannot change them.")
             if (view.services.isEmpty()) Note("The router reported no services.")
             else SfList {
                 view.services.forEachIndexed { i, service ->
@@ -200,11 +206,12 @@ internal fun ServicesScreen(holder: LoadHolder<FeatureView>, changes: ChangeCont
                         trailing = { service.status().let { Pill(it.text, it.tone) } })
                 }
             }
-            if (!demo) view.forms.forEach { form -> FoldForm(form, changes::submit) }
+            val controller = changes
+            if (!demo && controller != null) view.forms.forEach { form -> key(form.title) { FoldForm(form, controller::submit) } }
         }
         view.services.firstOrNull { it.name == selected }?.let { service ->
             ServiceDialog(service, onClose = { selected = null }, onAction = { action ->
-                changes.submit(Phase4.serviceAction(service.name, action))
+                changes?.submit(Phase4.serviceAction(service.name, action))
                 selected = null
             })
         }

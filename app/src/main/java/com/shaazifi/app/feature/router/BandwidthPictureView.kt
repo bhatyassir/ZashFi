@@ -75,50 +75,7 @@ fun BandwidthPictureView(p: BandwidthPicture) {
     }
 
     // Who takes how much of the download.
-    val total = active.sumOf { it.downBytesPerSec + it.upBytesPerSec }
-    if (active.isNotEmpty() && total > 0) {
-        Eyebrow("Share of the internet now", modifier = Modifier.padding(top = 6.dp))
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(c.surface)
-                .border(1.dp, c.line, RoundedCornerShape(16.dp))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .clip(CircleShape)
-            ) {
-                active.take(6).forEachIndexed { i, d ->
-                    val share = ((d.downBytesPerSec + d.upBytesPerSec) / total).toFloat()
-                    val w by animateFloatAsState(share.coerceAtLeast(0.01f), tween(600), label = "share")
-                    Box(Modifier.weight(w).fillMaxHeight().background(SHARE_HUES[i % SHARE_HUES.size].colors().first))
-                }
-                if (active.size > 6) {
-                    val rest = active.drop(6).sumOf { it.downBytesPerSec + it.upBytesPerSec } / total
-                    Box(Modifier.weight(rest.toFloat().coerceAtLeast(0.01f)).fillMaxHeight().background(c.muted))
-                }
-            }
-            active.take(6).chunked(2).forEach { pair ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    pair.forEach { d ->
-                        val i = active.indexOf(d)
-                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(9.dp).clip(CircleShape).background(SHARE_HUES[i % SHARE_HUES.size].colors().first))
-                            Spacer(Modifier.width(6.dp))
-                            Text(d.name, color = c.ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                            Text("${(100 * (d.downBytesPerSec + d.upBytesPerSec) / total).toInt()}%", color = c.muted, fontSize = 12.sp)
-                        }
-                    }
-                    if (pair.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
-        }
-    }
+    StackedShareBarCard(p.devices)
 
     Eyebrow(if (active.isEmpty()) "No device is using the internet right now" else "Devices now", modifier = Modifier.padding(top = 6.dp))
     val most = active.maxOfOrNull { maxOf(it.downBytesPerSec, it.upBytesPerSec) }?.coerceAtLeast(1.0) ?: 1.0
@@ -193,17 +150,75 @@ private fun DeviceUsageCard(d: BandwidthMeter.DeviceRate, history: List<Pair<Dou
         RateBar(d.upBytesPerSec, most, up)
         if (history.size >= 2) MiniGraph(history, down, up, Modifier.fillMaxWidth().height(36.dp))
         if (open) {
-            if (d.top.isEmpty()) {
-                Text("No traffic in the last moments.", style = SfText.sub, color = c.muted)
-            } else {
-                Text("Talks most to", color = c.muted, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
-                d.top.forEach { r ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${r.remote}  ${r.proto}/${r.port}", style = SfText.mono, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                        Text("↓ ${RealtimeStats.rateText(r.downBytesPerSec)} ↑ ${RealtimeStats.rateText(r.upBytesPerSec)}", color = c.muted, fontSize = 11.sp)
+            RemoteEndpointsSection(d.top, emptyText = "No traffic in the last moments.")
+        }
+    }
+}
+
+/** Stacked horizontal share bar and legend for the top active devices. */
+@Composable
+internal fun StackedShareBarCard(devices: List<BandwidthMeter.DeviceRate>, modifier: Modifier = Modifier) {
+    val c = SfTheme.colors
+    val active = devices.filter { it.downBytesPerSec + it.upBytesPerSec >= 1_000 }
+    val total = active.sumOf { it.downBytesPerSec + it.upBytesPerSec }
+    if (active.isEmpty() || total <= 0.0) return
+    Eyebrow("Share of the internet now", modifier = modifier.padding(top = 6.dp))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(c.surface)
+            .border(1.dp, c.line, RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(14.dp)
+                .clip(CircleShape)
+        ) {
+            active.take(6).forEachIndexed { i, d ->
+                val share = ((d.downBytesPerSec + d.upBytesPerSec) / total).toFloat()
+                val w by animateFloatAsState(share.coerceAtLeast(0.01f), tween(600), label = "share")
+                Box(Modifier.weight(w).fillMaxHeight().background(SHARE_HUES[i % SHARE_HUES.size].colors().first))
+            }
+            if (active.size > 6) {
+                val rest = active.drop(6).sumOf { it.downBytesPerSec + it.upBytesPerSec } / total
+                Box(Modifier.weight(rest.toFloat().coerceAtLeast(0.01f)).fillMaxHeight().background(c.muted))
+            }
+        }
+        active.take(6).chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pair.forEach { d ->
+                    val i = active.indexOf(d)
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(9.dp).clip(CircleShape).background(SHARE_HUES[i % SHARE_HUES.size].colors().first))
+                        Spacer(Modifier.width(6.dp))
+                        Text(d.name, color = c.ink, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Text("${(100 * (d.downBytesPerSec + d.upBytesPerSec) / total).toInt()}%", color = c.muted, fontSize = 12.sp)
                     }
                 }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
             }
+        }
+    }
+}
+
+/** Remote endpoints a device talks to most, with per-direction byte rates. */
+@Composable
+internal fun RemoteEndpointsSection(top: List<BandwidthMeter.Remote>, emptyText: String? = null) {
+    val c = SfTheme.colors
+    if (top.isEmpty()) {
+        if (emptyText != null) Text(emptyText, style = SfText.sub, color = c.muted)
+        return
+    }
+    Text("Talks most to", color = c.muted, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold)
+    top.forEach { r ->
+        val endpoint = if (r.port.isNotBlank()) "${r.proto}/${r.port}" else r.proto
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${r.remote}  $endpoint", style = SfText.mono, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("↓ ${RealtimeStats.rateText(r.downBytesPerSec)} ↑ ${RealtimeStats.rateText(r.upBytesPerSec)}", color = c.muted, fontSize = 11.sp)
         }
     }
 }

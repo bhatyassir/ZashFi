@@ -86,9 +86,12 @@ class ShaaziFiV2Test {
            "other":{".type":"rule","name":"Parental: Tablet","src":"guest","dest":"wan","target":"REJECT","src_mac":"${device.mac}"}}
         """)
         val rules = AccessRule.parse(firewall)
-        assertEquals(3, rules.size)
+        // Immediate, scheduled and non-lan-zone rules are all recognized; only the scheduled one
+        // is exempt from the resume plan below.
+        assertEquals(4, rules.size)
+        assertEquals("guest", rules.single { it.id == "other" }.sourceZone)
         val resume = (changeInternet(device, rules) as PlanResult.Ready).plan
-        assertEquals(setOf("old", "manual"), resume.ops.map { (it as UciOp.Set).section }.toSet())
+        assertEquals(setOf("old", "manual", "other"), resume.ops.map { (it as UciOp.Set).section }.toSet())
         assertEquals("Enabled schedules still apply.", resume.note)
         val paused = (changeInternet(device, rules.map { it.copy(enabled = false) }) as PlanResult.Ready).plan
         assertEquals(UciOp.Set("firewall", "old", mapOf("enabled" to "1")), paused.ops.single())

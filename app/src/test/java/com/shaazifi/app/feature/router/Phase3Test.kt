@@ -36,6 +36,25 @@ class Phase3Test {
         assertEquals(listOf("eth0"), ports.map { it.label }) // loopback hidden
         assertTrue(ports[0].value.contains("1000"))
         assertTrue(ports[0].sub!!.contains("2.0 GB"))
+
+        // On DSA routers, pppoe-wan, VLAN sub-interfaces, and the eth0 CPU conduit are NOT physical LAN/INTERNET ports.
+        val pppDump = j("""{"interface":[
+            {"interface":"lan","up":true,"proto":"static","device":"br-lan"},
+            {"interface":"wan","up":true,"proto":"pppoe","device":"wan","l3_device":"pppoe-wan"}]}""")
+        val dsaDevices = j("""{
+            "br-lan":{"name":"br-lan","devtype":"bridge","bridge-members":["lan1","lan2"],"stats":{"rx_bytes":10,"tx_bytes":10}},
+            "eth0":{"name":"eth0","link":{"speed":1000,"duplex":"full","carrier":true},"stats":{"rx_bytes":100,"tx_bytes":100}},
+            "eth0.10":{"name":"eth0.10","link":{"speed":1000,"duplex":"full","carrier":true},"stats":{"rx_bytes":5,"tx_bytes":5}},
+            "lan1":{"name":"lan1","link":{"speed":1000,"duplex":"full","carrier":true},"stats":{"rx_bytes":20,"tx_bytes":20}},
+            "lan2":{"name":"lan2","link":{"speed":0,"carrier":false},"stats":{"rx_bytes":0,"tx_bytes":0}},
+            "wan":{"name":"wan","link":{"speed":1000,"duplex":"full","carrier":true},"stats":{"rx_bytes":50,"tx_bytes":50}},
+            "pppoe-wan":{"name":"pppoe-wan","stats":{"rx_bytes":50,"tx_bytes":50}}}""")
+        val dsa = FeatureMappers.interfaces(dsaDevices, pppDump)
+        val physicalNames = dsa.network!!.ports.filter { it.kind == PortKind.INTERNET || it.kind == PortKind.LAN }.map { it.name }.toSet()
+        assertEquals(setOf("wan", "lan1", "lan2"), physicalNames)
+        assertEquals(PortKind.OTHER, dsa.network!!.ports.first { it.name == "pppoe-wan" }.kind)
+        assertEquals(PortKind.OTHER, dsa.network!!.ports.first { it.name == "eth0" }.kind)
+        assertEquals(PortKind.OTHER, dsa.network!!.ports.first { it.name == "eth0.10" }.kind)
     }
 
     @Test
@@ -85,9 +104,21 @@ class Phase3Test {
         assertFalse(limited.ubus("rc", "list"))
         assertTrue(limited.uciRead("network"))
         assertFalse(limited.uciRead("firewall"))
+        assertFalse(limited.uciWrite("network"))
+        assertTrue(root.uciWrite("network"))
+        assertTrue(root.canChangeFeature("wan"))
+        assertFalse(limited.canChangeFeature("wan"))
+        assertTrue("protection needs adblock/banIP write", root.canChangeFeature("protection"))
+        assertTrue("usb needs minidlna write", root.canChangeFeature("usb"))
+        assertTrue("services need rc init write", root.canChangeFeature("services"))
+        assertFalse("limited login cannot change protection", limited.canChangeFeature("protection"))
+        assertTrue("wan needs uci network read", limited.feature("wan"))
+        assertFalse("firewall needs uci firewall read", limited.feature("firewall"))
+        assertFalse("traffic needs network.device/network.interface", limited.feature("traffic"))
         assertFalse("services need rc list", limited.feature("services"))
         assertTrue("unknown features are not hidden", limited.feature("something-new"))
         assertTrue("no answer: hide nothing", Capabilities.UNKNOWN.feature("services"))
+        assertTrue("no answer: allow changes", Capabilities.UNKNOWN.canChangeFeature("wan"))
     }
 
     @Test

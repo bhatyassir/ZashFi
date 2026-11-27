@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -161,7 +162,7 @@ fun FeatureViewContent(
     footer: (@Composable ColumnScope.() -> Unit)? = null
 ) {
     val c = SfTheme.colors
-    var actionError by remember(view) { mutableStateOf<String?>(null) }
+    var actionError by remember(spec.id) { mutableStateOf<String?>(null) }
     val request: (PlanResult) -> Unit = { result ->
         when (result) {
             is PlanResult.Ready -> { actionError = null; changes?.request(result.plan) }
@@ -191,6 +192,7 @@ fun FeatureViewContent(
             spec.id == "bandwidth" -> BandwidthPage(view, LocalKnownDevices.current, onDevice)
             picture != null -> NetworkPictureView(picture, onLiveTraffic)
             else -> view.sections.forEach { section ->
+                key(section.heading) {
                 SectionTitle(section.heading)
                 val formsVisible = changes != null && (section.form != null || section.moreForms.isNotEmpty())
                 if (spec.id !in setOf("traffic", "usage", "guest", "mesh") && !formsVisible && SectionLook.asTiles(section)) {
@@ -200,39 +202,44 @@ fun FeatureViewContent(
                             if (pair.size == 1) Box(Modifier.weight(1f))
                         }
                     }
-                    return@forEach
-                }
-                val mainRows = section.rows.filterNot { it.detail }
-                val detailRows = section.rows.filter { it.detail }
-                val form = if (changes != null) section.form else null
-                if (section.rows.isEmpty() && form == null) {
-                    Note(section.emptyText ?: "Nothing here.")
                 } else {
-                    // One card per group: its rows, its folded details, and its own change form.
-                    SfList {
-                        var first = true
-                        if (section.rows.isEmpty()) {
-                            FeatureRow(ViewRow(section.emptyText ?: "Nothing here."), null); first = false
-                        }
-                        mainRows.forEach { r ->
-                            if (!first) SfDivider(); first = false
-                            FeatureRow(r, if (changes != null) request else null)
-                        }
-                        if (detailRows.isNotEmpty()) {
-                            if (!first) SfDivider(); first = false
-                            FoldRow("Details", detailRows.joinToString(" · ") { it.value.ifBlank { it.label } }) {
-                                detailRows.forEach { r -> SfDivider(); FeatureRow(r, if (changes != null) request else null) }
+                    val mainRows = section.rows.filterNot { it.detail }
+                    val detailRows = section.rows.filter { it.detail }
+                    val form = if (changes != null) section.form else null
+                    if (section.rows.isEmpty() && form == null && (changes == null || section.moreForms.isEmpty())) {
+                        Note(section.emptyText ?: "Nothing here.")
+                    } else {
+                        // One card per group: its rows, its folded details, and its own change form.
+                        SfList {
+                            var first = true
+                            if (section.rows.isEmpty()) {
+                                FeatureRow(ViewRow(section.emptyText ?: "Nothing here."), null); first = false
+                            }
+                            mainRows.forEach { r ->
+                                if (!first) SfDivider(); first = false
+                                FeatureRow(r, if (changes != null) request else null)
+                            }
+                            if (detailRows.isNotEmpty()) {
+                                if (!first) SfDivider(); first = false
+                                FoldRow("Details", detailRows.joinToString(" · ") { it.value.ifBlank { it.label } }) {
+                                    detailRows.forEach { r -> SfDivider(); FeatureRow(r, if (changes != null) request else null) }
+                                }
+                            }
+                            if (form != null) {
+                                if (!first) SfDivider(); first = false
+                                key(form.title) {
+                                    FoldForm(form, submit = { result -> changes?.let { submitForm(result, it) } ?: "Changes are off here." })
+                                }
+                            }
+                            if (changes != null) section.moreForms.forEach { f ->
+                                if (!first) SfDivider(); first = false
+                                key(f.title) {
+                                    FoldForm(f, submit = { result -> submitForm(result, changes) })
+                                }
                             }
                         }
-                        if (form != null) {
-                            if (!first) SfDivider(); first = false
-                            FoldForm(form, submit = { result -> changes?.let { submitForm(result, it) } ?: "Changes are off here." })
-                        }
-                        if (changes != null) section.moreForms.forEach { f ->
-                            if (!first) SfDivider(); first = false
-                            FoldForm(f, submit = { result -> submitForm(result, changes) })
-                        }
                     }
+                }
                 }
             }
         }
@@ -244,15 +251,19 @@ fun FeatureViewContent(
             SfList {
                 view.forms.forEachIndexed { i, form ->
                     if (i > 0) SfDivider()
-                    FoldForm(form, submit = { result -> submitForm(result, changes) })
+                    key(form.title) {
+                        FoldForm(form, submit = { result -> submitForm(result, changes) })
+                    }
                 }
             }
         }
         footer?.invoke(this)
 
-        if (routerPageAction != null && spec.untangledId != null) {
+        // Every feature gets a web fallback, not just those with an UnTangled id. LuCI pages are
+        // mapped by feature id in RouterWebPages (falling back to the LuCI front page).
+        if (routerPageAction != null) {
             val hasActions = changes != null && (view.forms.isNotEmpty() || view.sections.any { s -> s.rows.any { it.onToggle != null || it.extra != null } })
-            routerPageAction(if (hasActions) "More in the router pages" else "Change in the router pages", spec.untangledId)
+            routerPageAction(if (hasActions) "More in the router pages" else "Change in the router pages", spec.untangledId ?: spec.id)
         }
         Box(Modifier.padding(bottom = 12.dp))
     }
@@ -373,9 +384,16 @@ private fun FoldRow(title: String, summary: String?, content: @Composable () -> 
 @Composable
 internal fun FoldForm(form: FeatureForm, submit: (PlanResult) -> String?, showHeader: Boolean = true) {
     val c = SfTheme.colors
+    val fieldKeys = form.fields.map { it.key }
     var open by remember(form.title, showHeader) { mutableStateOf(!showHeader) }
     var error by remember(form.title) { mutableStateOf<String?>(null) }
-    val values = remember(form) { mutableStateMapOf<String, String>().apply { form.fields.forEach { put(it.key, it.initial) } } }
+    val values = remember(form.title, fieldKeys) { mutableStateMapOf<String, String>().apply { form.fields.forEach { put(it.key, it.initial) } } }
+    val dirty = remember(form.title, fieldKeys) { mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(form) {
+        form.fields.forEach { f ->
+            if (!f.secret && dirty[f.key] != true) values[f.key] = f.initial
+        }
+    }
     if (showHeader) Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -399,11 +417,18 @@ internal fun FoldForm(form: FeatureForm, submit: (PlanResult) -> String?, showHe
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         form.fields.forEach { f ->
-            f.pick?.let { kind -> DevicePicker(kind, values[f.key].orEmpty()) { values[f.key] = it; error = null } }
-            if (f.choices.isNotEmpty()) ChoiceChips(f.choices, f.multi, values[f.key].orEmpty()) { values[f.key] = it; error = null }
+            f.pick?.let { kind ->
+                val current = values[f.key].orEmpty()
+                if (f.multi) {
+                    MultiDevicePicker(kind, current) { values[f.key] = it; dirty[f.key] = true; error = null }
+                } else {
+                    DevicePicker(kind, current) { values[f.key] = it; dirty[f.key] = true; error = null }
+                }
+            }
+            if (f.choices.isNotEmpty()) ChoiceChips(f.choices, f.multi, values[f.key].orEmpty()) { values[f.key] = it; dirty[f.key] = true; error = null }
             OutlinedTextField(
                 value = values[f.key].orEmpty(),
-                onValueChange = { values[f.key] = it; error = null },
+                onValueChange = { values[f.key] = it; dirty[f.key] = true; error = null },
                 label = { Text(f.label) },
                 placeholder = f.hint?.let { h -> { Text(h) } },
                 singleLine = true,
@@ -422,6 +447,7 @@ internal fun FoldForm(form: FeatureForm, submit: (PlanResult) -> String?, showHe
             error = submit(form.build(values.toMap()))
             if (error == null) {
                 open = false
+                dirty.clear()
                 // Typed passwords are not kept once the change has been handed over.
                 form.fields.filter { it.secret }.forEach { values[it.key] = "" }
             }

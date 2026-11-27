@@ -1,12 +1,12 @@
 package com.shaazifi.app.feature.web
 
+import com.shaazifi.app.feature.adguard.AdGuardQueryEntry
+import com.shaazifi.app.feature.home.WifiNetworkKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import com.shaazifi.app.feature.home.WifiNetworkKey
-import com.shaazifi.app.feature.adguard.AdGuardQueryEntry
 
 class ShellNavStateTest {
 
@@ -48,14 +48,16 @@ class ShellNavStateTest {
 
     @Test
     fun adGuardAndItsQueryLogAreInTheAdGuardTab() {
-        // Owner feedback 2026-11-17: back follows the path taken, so open it the way the app does.
-        val log = ShellNavState().select(MainTab.AdGuard).openQueryLog()
+        val adGuard = ShellNavState().select(MainTab.AdGuard)
+        val log = adGuard.openQueryLog()
         assertEquals(MainTab.AdGuard, log.tab)
         assertTrue(log.queryLogOpen)
+        assertTrue(log.canGoBack)
+
         val back = log.back()
         assertFalse(back.queryLogOpen)
         assertEquals(MainTab.AdGuard, back.tab)
-        assertEquals(MainTab.Home, back.back().tab)
+        assertFalse(back.canGoBack)
     }
 
     @Test
@@ -70,27 +72,52 @@ class ShellNavStateTest {
     }
 
     @Test
-    fun moreStartsOnTheListAndBackReturnsToIt() {
+    fun moreStartsOnTheListAndBackPopsIntraTabPages() {
         val more = ShellNavState().select(MainTab.More)
         assertNull(more.morePage)
-        // Owner feedback 2026-11-17: back from the More list returns to the tab you came from.
-        assertEquals(MainTab.Home, more.back().tab)
+        assertFalse(more.canGoBack)
+
         val wan = more.openMore(MorePage.Feature("wan"))
         assertEquals(MorePage.Feature("wan"), wan.morePage)
         assertTrue(wan.canGoBack)
         assertNull(wan.back().morePage)
+        assertEquals(MainTab.More, wan.back().tab)
+        assertFalse(wan.back().canGoBack)
     }
 
     @Test
     fun tappingTheCurrentTabAgainReturnsToItsFirstScreen() {
         assertNull(ShellNavState().openMore(MorePage.Settings).select(MainTab.More).morePage)
         assertNull(ShellNavState().openWifiFeature("guest").select(MainTab.Wifi).wifiPage)
+        assertNull(ShellNavState().select(MainTab.AdGuard).openQueryLog().select(MainTab.AdGuard).queryLogEntry)
     }
 
     @Test
-    fun leavingATabKeepsItsPage() {
-        val s = ShellNavState().openMore(MorePage.Feature("log")).select(MainTab.Home).select(MainTab.More)
-        assertEquals(MorePage.Feature("log"), s.morePage)
+    fun leavingATabKeepsItsPageAcrossMoreWifiAndAdGuard() {
+        val moreKept = ShellNavState().openMore(MorePage.Feature("log")).select(MainTab.Home).select(MainTab.More)
+        assertEquals(MorePage.Feature("log"), moreKept.morePage)
+
+        val wifiKept = ShellNavState().openWifiFeature("guest").select(MainTab.Home).select(MainTab.Wifi)
+        assertEquals("guest", wifiKept.wifiPage)
+        // Intra-tab back pops the Wi-Fi sub-page back to the Wi-Fi root without jumping to Home.
+        assertTrue(wifiKept.canGoBack)
+        assertEquals(MainTab.Wifi, wifiKept.back().tab)
+        assertNull(wifiKept.back().wifiPage)
+        assertFalse(wifiKept.back().canGoBack)
+
+        val adGuardKept = ShellNavState().openAdGuardPage("dns").select(MainTab.Home).select(MainTab.AdGuard)
+        assertEquals("dns", adGuardKept.adGuardPage)
+    }
+
+    @Test
+    fun switchingTabsRepeatedlyDoesNotBuildCrossTabBackHistory() {
+        var nav = ShellNavState()
+        val tabs = MainTab.entries
+        repeat(45) { step ->
+            nav = nav.select(tabs[step % tabs.size])
+            assertFalse("Cross-tab switch #$step must not enable shell Back", nav.canGoBack)
+        }
+        assertEquals(nav, nav.back())
     }
 
     @Test
@@ -116,6 +143,7 @@ class ShellNavStateTest {
     @Test
     fun backDoesNothingAtTopLevel() {
         val home = ShellNavState()
+        assertFalse(home.canGoBack)
         assertEquals(home, home.back())
     }
 }

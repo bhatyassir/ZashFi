@@ -48,6 +48,7 @@
         ],
         "file": [
           "read",
+          "list",
           "exec"
         ],
         "rc": [
@@ -77,7 +78,10 @@
         "ksmbd",
         "samba4",
         "adblock",
-        "banip"
+        "banip",
+        "nlbwmon",
+        "adguardhome",
+        "wireless"
       ],
       "file": {
         "/proc/stat": [
@@ -87,6 +91,60 @@
           "read"
         ],
         "/proc/mounts": [
+          "read"
+        ],
+        "/sys/class/hwmon": [
+          "list"
+        ],
+        "/sys/class/thermal": [
+          "list"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/hwmon*/name": [
+          "read"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/hwmon*/temp*_input": [
+          "read"
+        ],
+        "/sys/devices/platform/soc/*/ieee80211/phy*/hwmon*/name": [
+          "read"
+        ],
+        "/sys/devices/platform/soc/*/ieee80211/phy*/hwmon*/temp*_input": [
+          "read"
+        ],
+        "/sys/devices/platform/soc/*/ieee80211/phy*/hwmon*/temp*_label": [
+          "read"
+        ],
+        "/sys/devices/platform/soc/*/ieee80211/phy*/hwmon*/temp*_max": [
+          "read"
+        ],
+        "/sys/devices/platform/soc/*/ieee80211/phy*/hwmon*/temp*_crit": [
+          "read"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/temp": [
+          "read"
+        ],
+        "/sys/devices/virtual/thermal/thermal_zone*/type": [
+          "read"
+        ],
+        "/sys/class/hwmon/hwmon*/name": [
+          "read"
+        ],
+        "/sys/class/hwmon/hwmon*/temp*_input": [
+          "read"
+        ],
+        "/sys/class/hwmon/hwmon*/temp*_label": [
+          "read"
+        ],
+        "/sys/class/hwmon/hwmon*/temp*_max": [
+          "read"
+        ],
+        "/sys/class/hwmon/hwmon*/temp*_crit": [
+          "read"
+        ],
+        "/sys/class/thermal/thermal_zone*/type": [
+          "read"
+        ],
+        "/sys/class/thermal/thermal_zone*/temp": [
           "read"
         ],
         "/usr/bin/vnstat --json": [
@@ -101,6 +159,9 @@
         "/usr/bin/tailscale status --json": [
           "exec"
         ],
+        "/usr/bin/apk info": [
+          "exec"
+        ],
         "/usr/bin/apk list -I": [
           "exec"
         ],
@@ -113,16 +174,49 @@
         "/usr/bin/ping -4 -c 5 -W 1 *": [
           "exec"
         ],
+        "/bin/ping -6 -c 5 -W 1 *": [
+          "exec"
+        ],
+        "/usr/bin/ping -6 -c 5 -W 1 *": [
+          "exec"
+        ],
         "/bin/traceroute -4 -q 1 -w 1 -n -m 20 *": [
           "exec"
         ],
         "/usr/bin/traceroute -4 -q 1 -w 1 -n -m 20 *": [
           "exec"
         ],
+        "/etc/crontabs/root": [
+          "read"
+        ],
+        "/bin/traceroute -6 -q 1 -w 1 -n -m 20 *": [
+          "exec"
+        ],
+        "/usr/bin/traceroute -6 -q 1 -w 1 -n -m 20 *": [
+          "exec"
+        ],
         "/usr/bin/nslookup *": [
           "exec"
         ],
+        "/bin/nslookup *": [
+          "exec"
+        ],
         "/bin/dmesg -r": [
+          "exec"
+        ],
+        "/bin/ps -w": [
+          "exec"
+        ],
+        "/sbin/ip -4 route show": [
+          "exec"
+        ],
+        "/sbin/ip -6 route show": [
+          "exec"
+        ],
+        "/usr/sbin/nft list ruleset": [
+          "exec"
+        ],
+        "/usr/bin/led-nightmode check": [
           "exec"
         ]
       }
@@ -139,7 +233,8 @@
           "rollback"
         ],
         "file": [
-          "exec"
+          "exec",
+          "write"
         ],
         "rc": [
           "init"
@@ -166,6 +261,9 @@
         "network"
       ],
       "file": {
+        "/etc/crontabs/root": [
+          "write"
+        ],
         "/etc/init.d/firewall reload": [
           "exec"
         ],
@@ -197,6 +295,12 @@
           "exec"
         ],
         "/etc/init.d/minidlna enable": [
+          "exec"
+        ],
+        "/usr/bin/led-nightmode night": [
+          "exec"
+        ],
+        "/usr/bin/led-nightmode day": [
           "exec"
         ]
       }

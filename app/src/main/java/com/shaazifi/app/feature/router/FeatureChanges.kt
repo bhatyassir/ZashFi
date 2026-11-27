@@ -25,24 +25,36 @@ object FeatureChanges {
         return parts.map { p -> p.toIntOrNull()?.takeIf { it in 0..255 && p == it.toString() } ?: return null }
     }
 
-    /** A device address for forwarding: private IPv4, not the router, not .0/.255. Returns an error or null. */
-    private fun checkDeviceIp(ip: String, routerIp: String): String? {
+    /** A device address for forwarding: private IPv4, not the router, not network/broadcast. Returns an error or null. */
+    private fun checkDeviceIp(ip: String, routerIp: String, prefixBits: Int = 24): String? {
         val n = ipv4(ip) ?: return "Enter the device's address, like 192.168.1.50."
         val private = n[0] == 10 || (n[0] == 172 && n[1] in 16..31) || (n[0] == 192 && n[1] == 168)
         if (!private) return "Use a device address on your home network, like 192.168.1.50."
-        if (ip.trim() == routerIp) return "That is the router's own address."
-        if (n[3] == 0 || n[3] == 255) return "Addresses ending in .0 or .255 can't be used for a device."
+        val routerAddr = ipv4(routerIp)
+        if ((routerAddr != null && n == routerAddr) || (routerIp.isNotBlank() && ip.trim() == routerIp.trim())) {
+            return "That is the router's own address."
+        }
+        val bits = prefixBits.coerceIn(8, 30)
+        val addr = n.fold(0L) { acc, b -> (acc shl 8) or b.toLong() }
+        val hostMask = (1L shl (32 - bits)) - 1L
+        val hostPart = addr and hostMask
+        if (hostPart == 0L || hostPart == hostMask) {
+            return if (bits == 24) "Addresses ending in .0 or .255 can't be used for a device."
+            else "Network and broadcast addresses can't be used for a device."
+        }
         return null
     }
 
-    /** "8443" or "6000-6010", each 1..65535, range low to high. Returns the cleaned text or null. */
-    private fun port(text: String): String? {
+    /** "8443" or "6000-6010", each 1..65535, range low to high. Returns cleaned text and (start, end). */
+    private fun portRange(text: String): Pair<String, Pair<Int, Int>>? {
         val t = text.trim()
         val bits = t.split('-')
         if (bits.size !in 1..2) return null
         val nums = bits.map { it.trim().toIntOrNull()?.takeIf { p -> p in 1..65535 } ?: return null }
         if (nums.size == 2 && nums[0] > nums[1]) return null
-        return nums.joinToString("-")
+        val start = nums[0]
+        val end = nums.getOrElse(1) { start }
+        return nums.joinToString("-") to (start to end)
     }
 
     // ---------------------------------------------------------------- Guest Wi-Fi
@@ -53,6 +65,39 @@ object FeatureChanges {
         ops = listOf(UciOp.Set("wireless", section, mapOf("disabled" to if (on) "0" else "1"))),
         note = "The router restarts Wi-Fi on that radio, so Wi-Fi may drop for a few seconds. The app waits for it before keeping the change."
     ))
+
+    /**
+     * Adds the guest access point when the router has none. [sectionId] names the new UCI section
+     * (the guest form uses `guest_<radio>`); the key is typed by the owner and never read back.
+     */
+    fun createGuest(sectionId: String, radio: String, ssid: String, key: String, encryption: String): PlanResult {
+        val section = sectionId.trim()
+        if (!RouterWriter.isValidSectionName(section)) return invalid("The guest section name is not valid.")
+        val device = radio.trim()
+        if (!WifiRadio.isRadioName(device)) return invalid("Choose a Wi-Fi radio for the guest network.")
+        val name = ssid.trim()
+        if (name.isEmpty()) return invalid("Enter a name for the guest network.")
+        if (name.toByteArray(Charsets.UTF_8).size > 32) return invalid("The guest network name can be at most 32 characters.")
+        if (key.length !in 8..63) return invalid("The guest password needs 8 to 63 characters.")
+        val enc = encryption.trim().lowercase(Locale.ROOT)
+        if (enc !in setOf("sae-mixed", "psk2", "sae")) return invalid("Choose WPA2, WPA3 or WPA2/WPA3 security.")
+        return ready(ChangePlan(
+            title = "Create the guest network \"$name\"?",
+            lines = listOf(
+                ChangeLine("Guest network", "None", name),
+                ChangeLine("Security", "", FeatureMappers.encryptionLabel(enc))
+            ),
+            ops = listOf(UciOp.Add("wireless", "wifi-iface", mapOf(
+                "device" to device,
+                "mode" to "ap",
+                "network" to "guest",
+                "ssid" to name,
+                "key" to key,
+                "encryption" to enc
+            ), name = section)),
+            note = "The router restarts Wi-Fi on that radio, so Wi-Fi may drop for a few seconds. The app waits for it before keeping the change."
+        ))
+    }
 
     fun wifiEnabled(section: String, ssid: String, on: Boolean): PlanResult = ready(ChangePlan(
         title = "Turn ${onOff(on).lowercase()} $ssid?",
@@ -66,8 +111,15 @@ object FeatureChanges {
     fun addPortForward(name: String, externalPort: String, deviceIp: String, internalPort: String, proto: String, routerIp: String): PlanResult {
         val cleanName = name.trim().take(40)
         if (cleanName.isBlank()) return invalid("Give the rule a name, like Camera.")
-        val ext = port(externalPort) ?: return invalid("The outside port must be a number from 1 to 65535 (or a range like 6000-6010).")
-        val int = if (internalPort.isBlank()) ext else port(internalPort) ?: return invalid("The device port must be a number from 1 to 65535.")
+        val (ext, extSpan) = portRange(externalPort)
+            ?: return invalid("The outside port must be a number from 1 to 65535 (or a range like 6000-6010).")
+        val (int, intSpan) = if (internalPort.isBlank()) ext to extSpan
+        else portRange(internalPort) ?: return invalid("The device port must be a number from 1 to 65535 (or a matching range).")
+        val extIsRange = '-' in ext
+        val intIsRange = '-' in int
+        if (extIsRange != intIsRange || (extSpan.second - extSpan.first) != (intSpan.second - intSpan.first)) {
+            return invalid("The outside and device port ranges must be the same size.")
+        }
         checkDeviceIp(deviceIp, routerIp)?.let { return invalid(it) }
         val protoValue: Any = when (proto.trim().lowercase(Locale.ROOT)) {
             "tcp" -> "tcp"
@@ -143,6 +195,15 @@ object FeatureChanges {
 
     private val MAC = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
     private val DAYS = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    private val DAY_ALIASES = mapOf(
+        "mon" to "Mon", "monday" to "Mon",
+        "tue" to "Tue", "tuesday" to "Tue",
+        "wed" to "Wed", "wednesday" to "Wed",
+        "thu" to "Thu", "thursday" to "Thu",
+        "fri" to "Fri", "friday" to "Fri",
+        "sat" to "Sat", "saturday" to "Sat",
+        "sun" to "Sun", "sunday" to "Sun"
+    )
     private val TIME = Regex("^([01]?\\d|2[0-3]):([0-5]\\d)$")
 
     /** Finds a device by hardware address or by its name in [nameByMac]. */
@@ -177,13 +238,16 @@ object FeatureChanges {
         val (mac, name) = findDevice(device, nameByMac)
             ?: return invalid("No device by that name. Type its name as shown in Devices, or its hardware address.")
         val dayList = days.split(' ', ',').filter { it.isNotBlank() }.map { d ->
-            DAYS.firstOrNull { it.equals(d.take(3), ignoreCase = true) && d.length <= 9 }
+            DAY_ALIASES[d.trim().lowercase(Locale.ROOT)]
                 ?: return invalid("Days must be like: Mon Tue Wed (or leave empty for every day).")
         }.distinct()
         if (!TIME.matches(from.trim()) || !TIME.matches(to.trim())) return invalid("Enter the time as hours and minutes, like 21:30.")
+        val startTime = from.trim().padStart(5, '0')
+        val stopTime = to.trim().padStart(5, '0')
+        if (startTime == stopTime) return invalid("The start and end times cannot be the same.")
         val values = parentalBase(mac, name).toMutableMap<String, Any>()
-        values["start_time"] = from.trim().padStart(5, '0')
-        values["stop_time"] = to.trim().padStart(5, '0')
+        values["start_time"] = startTime
+        values["stop_time"] = stopTime
         if (dayList.isNotEmpty() && dayList.size < 7) values["weekdays"] = dayList.sortedBy { DAYS.indexOf(it) }.joinToString(" ")
         return ready(ChangePlan(
             title = "Block the internet for $name on a schedule?",
@@ -277,11 +341,13 @@ object FeatureChanges {
     private val LEASE = Regex("^(\\d+)([mhd])$")
 
     /** Address pool: first address (.start), how many (limit) and lease time like 30m, 12h or 2d (at least 2 minutes). */
-    fun dhcpPool(section: String, start: String, limit: String, leasetime: String): PlanResult {
-        val st = start.trim().removePrefix(".").toIntOrNull()?.takeIf { it in 1..253 }
-            ?: return invalid("First address must be a number from 1 to 253.")
-        val lim = limit.trim().toIntOrNull()?.takeIf { it >= 1 } ?: return invalid("How many must be at least 1.")
-        if (st + lim - 1 > 254) return invalid("The pool would run past .254. Lower the first address or how many.")
+    fun dhcpPool(section: String, start: String, limit: String, leasetime: String, prefixBits: Int = 24): PlanResult {
+        val bits = if (prefixBits in 8..30) prefixBits else 24
+        val maxHost = (1L shl (32 - bits)) - 2L
+        val st = start.trim().removePrefix(".").toLongOrNull()?.takeIf { it in 1L..maxHost }
+            ?: return invalid("First address must be a number from 1 to $maxHost.")
+        val lim = limit.trim().toLongOrNull()?.takeIf { it >= 1L } ?: return invalid("How many must be at least 1.")
+        if (st + lim - 1L > maxHost) return invalid("The pool would run past .$maxHost. Lower the first address or how many.")
         val m = LEASE.matchEntire(leasetime.trim().lowercase()) ?: return invalid("Write the lease time like 30m, 12h or 2d.")
         val minutes = m.groupValues[1].toLong() * when (m.groupValues[2]) { "m" -> 1L; "h" -> 60L; else -> 1440L }
         if (minutes < 2) return invalid("The lease time must be at least 2m.")
@@ -343,9 +409,7 @@ object FeatureChanges {
             if (encryption.startsWith("Open") || encryption.startsWith("Enhanced")) {
                 return invalid("This network is open (no password). Set its security in the router pages first.")
             }
-            val hex64 = newKey.length == 64 && newKey.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
-            val printable = newKey.length in 8..63 && newKey.all { it.code in 32..126 }
-            if (!hex64 && !printable) return invalid("The password needs 8 to 63 letters, numbers or symbols.")
+            if (!WifiRadio.isValidWpaPsk(newKey)) return invalid("The password needs 8 to 63 characters (or 64 hex digits).")
             values["key"] = newKey
             lines += ChangeLine("Password", "Current", "New password (hidden)")
         }
@@ -362,24 +426,37 @@ object FeatureChanges {
 
     // ---------------------------------------------------------------- Batch 3: WAN, IPv6, WireGuard
 
-    private fun maskBits(mask: List<Int>): Int? {
+    internal fun maskBits(mask: List<Int>): Int? {
         val v = mask.fold(0L) { acc, b -> (acc shl 8) or b.toLong() }
         val bits = java.lang.Long.bitCount(v)
         val expected = if (bits == 0) 0L else (0xFFFFFFFFL shl (32 - bits)) and 0xFFFFFFFFL
-        return if (v == expected && bits in 8..30) bits else null
+        return if (v == expected && bits in 8..32) bits else null
     }
+
+    internal fun maskBits(mask: String): Int? = ipv4(mask)?.let { maskBits(it) }
 
     /**
      * Internet (WAN) settings: automatic (DHCP), static, or PPPoE. Standard OpenWrt `network.wan`
      * options proto, ipaddr, netmask, gateway, dns, peerdns, username, password. The PPPoE
      * password is typed by the owner and never shown; empty keeps the current one when already on PPPoE.
      */
-    fun wan(currentProto: String, proto: String, ip: String, mask: String, gateway: String, dns: String, username: String, password: String): PlanResult {
+    fun wan(
+        currentProto: String,
+        proto: String,
+        ip: String,
+        mask: String,
+        gateway: String,
+        dns: String,
+        username: String,
+        password: String,
+        existingWan: UciSection? = null
+    ): PlanResult {
+        val cleanProto = proto.trim().lowercase()
         val values = mutableMapOf<String, Any>()
-        val lines = mutableListOf(ChangeLine("Connection type", FeatureMappers.protoLabel(currentProto), FeatureMappers.protoLabel(proto.trim().lowercase())))
+        val lines = mutableListOf(ChangeLine("Connection type", FeatureMappers.protoLabel(currentProto), FeatureMappers.protoLabel(cleanProto)))
         val dnsList = dns.split(' ', ',').map { it.trim() }.filter { it.isNotEmpty() }
         if (dnsList.any { ipv4(it) == null }) return invalid("DNS servers must be addresses like 1.1.1.1, separated by spaces.")
-        when (proto.trim().lowercase()) {
+        when (cleanProto) {
             "dhcp" -> values["proto"] = "dhcp"
             "static" -> {
                 val a = ipv4(ip) ?: return invalid("Enter the internet address the provider gave you, like 192.168.31.50.")
@@ -387,7 +464,7 @@ object FeatureChanges {
                 val bits = maskBits(m) ?: return invalid("That subnet mask is not valid. Use one like 255.255.255.0.")
                 val g = ipv4(gateway) ?: return invalid("Enter the gateway address the provider gave you.")
                 val net = { x: List<Int> -> (x.fold(0L) { acc, b -> (acc shl 8) or b.toLong() }) shr (32 - bits) }
-                if (net(a) != net(g)) return invalid("The gateway must be on the same network as the address (check the mask).")
+                if (bits < 32 && net(a) != net(g)) return invalid("The gateway must be on the same network as the address (check the mask).")
                 if (a == g) return invalid("The address and the gateway can't be the same.")
                 if (dnsList.isEmpty()) return invalid("With a static address, enter at least one DNS server, like 1.1.1.1.")
                 values += mapOf("proto" to "static", "ipaddr" to ip.trim(), "netmask" to mask.trim(), "gateway" to gateway.trim())
@@ -412,10 +489,29 @@ object FeatureChanges {
         } else {
             values["peerdns"] = "1"
         }
+        val clearCandidates = when (cleanProto) {
+            "dhcp" -> listOf("ipaddr", "netmask", "gateway", "username", "password")
+            "static" -> listOf("username", "password")
+            "pppoe" -> listOf("ipaddr", "netmask", "gateway")
+            else -> emptyList()
+        } + if (dnsList.isEmpty()) listOf("dns") else emptyList()
+        val toClear = if (existingWan != null) {
+            clearCandidates.filter { it in existingWan.options }
+        } else {
+            clearCandidates.filter { opt ->
+                when (opt) {
+                    "ipaddr", "netmask", "gateway" -> currentProto == "static" && cleanProto != "static"
+                    "username", "password" -> currentProto == "pppoe" && cleanProto != "pppoe"
+                    "dns" -> dnsList.isEmpty() && currentProto != cleanProto
+                    else -> false
+                }
+            }
+        }
+        val ops = listOf(UciOp.Set("network", "wan", values)) + toClear.map { UciOp.DeleteOption("network", "wan", it) }
         return ready(ChangePlan(
             title = "Change the internet connection?",
             lines = lines,
-            ops = listOf(UciOp.Set("network", "wan", values)),
+            ops = ops,
             checkInternet = true,
             note = "The internet drops for a moment. If you are using the app over the internet (VPN), you may lose it; the router then undoes the change by itself."
         ))

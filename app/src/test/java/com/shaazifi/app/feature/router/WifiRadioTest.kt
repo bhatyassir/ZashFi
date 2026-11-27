@@ -24,19 +24,34 @@ class WifiRadioTest {
     private val wifi = FeatureMappersTest.fixture("m7_luci_rpc_wirelessdevices.json")
     private val freq2g = Json.parseToJsonElement("""{"results":[{"channel":1,"mhz":2412,"band":2},{"channel":6,"mhz":2437,"band":2},{"channel":11,"mhz":2462,"band":2},{"channel":13,"mhz":2472,"band":2,"restricted":true,"flags":["no_ir"]}]}""").jsonObject
     private val power = Json.parseToJsonElement("""{"results":[{"dbm":10,"mw":10},{"dbm":20,"mw":100},{"dbm":30,"mw":1000}]}""").jsonObject
+    private val countries = Json.parseToJsonElement("""{"results":[{"code":"IN","country":"India"},{"code":"US","country":"United States"}]}""").jsonObject
 
     private fun plan(r: PlanResult) = (r as PlanResult.Ready).plan
     private fun err(r: PlanResult) = (r as PlanResult.Invalid).message
 
     @Test
     fun radiosAreReadWithTheirChoices() {
-        val radios = WifiRadio.radioInfos(wifi, mapOf("radio0" to freq2g), mapOf("radio0" to power))
+        val radios = WifiRadio.radioInfos(wifi, mapOf("radio0" to freq2g), mapOf("radio0" to power), mapOf("radio0" to countries))
         val r0 = radios.first { it.id == "radio0" }
         assertEquals("2g", r0.band)
         assertEquals(listOf(1, 6, 11), r0.channels) // 13 is restricted (no_ir): not offered, as in LuCI
         assertEquals(listOf(10, 20, 30), r0.powers)
-        assertTrue(WifiRadio.widthChoices(r0).all { it.startsWith("HE") })
-        assertTrue(WifiRadio.widthChoices(r0).contains("HE20"))
+        assertEquals(listOf("IN", "US"), r0.countries)
+        assertEquals(listOf("HT20", "HE20", "HT40", "HE40"), WifiRadio.widthChoices(r0))
+
+        // Wi-Fi 6 radio currently set to VHT80 is not trapped in VHT-only choices.
+        val r1 = radios.first { it.id == "radio1" }.copy(htmode = "VHT80")
+        assertTrue(WifiRadio.widthChoices(r1).containsAll(listOf("VHT80", "HE80", "HE80+80", "HE160")))
+        assertEquals(160, WifiRadio.mhz("HE80+80"))
+        assertEquals(20, WifiRadio.mhz("NOHT"))
+        assertEquals("160 MHz (HE80+80)", WifiRadio.widthLabel("HE80+80"))
+        assertEquals("20 MHz (NOHT)", WifiRadio.widthLabel("NOHT"))
+
+        // Missing config.band falls back to iwinfo.frequency.
+        val noBand = Json.parseToJsonElement("""{"radio0":{"config":{"channel":"36"},"iwinfo":{"frequency":5180,"htmodes":["HE20","HE80"]}}}""").jsonObject
+        val inferred = WifiRadio.radioInfos(noBand, emptyMap(), emptyMap()).single()
+        assertEquals("5g", inferred.band)
+        assertEquals("5 GHz", WifiRadio.bandLabel(inferred.band))
     }
 
     @Test
@@ -62,6 +77,8 @@ class WifiRadioTest {
            "encryption":{"enabled":true,"wpa":[2],"authentication":["psk"],"ciphers":["ccmp"]}},
           {"ssid":"Neighbour","bssid":"AA:BB:CC:00:00:02","mode":"Master","channel":1,"signal":-48,
            "encryption":{"enabled":true,"wpa":[3],"authentication":["sae"],"ciphers":["ccmp"]}},
+          {"ssid":"Hybrid","bssid":"AA:BB:CC:00:00:05","mode":"Master","channel":1,"signal":-52,
+           "encryption":{"enabled":true,"wpa":[2,3],"authentication":["psk","sae"],"ciphers":["ccmp"]}},
           {"ssid":"Free","bssid":"AA:BB:CC:00:00:03","mode":"Master","channel":11,"signal":-80,"encryption":{"enabled":false}},
           {"ssid":"Office","bssid":"AA:BB:CC:00:00:04","mode":"Master","channel":1,"signal":-60,
            "encryption":{"enabled":true,"wpa":[2],"authentication":["802.1x"],"ciphers":["ccmp"]}}]}"""
@@ -70,8 +87,9 @@ class WifiRadioTest {
     @Test
     fun scanResultsAreSortedAndLabelled() {
         val list = WifiRadio.parseScan(scanReply)
-        assertEquals(listOf("Neighbour", "Office", "Cafe", "Free"), list.map { it.ssid })
+        assertEquals(listOf("Neighbour", "Hybrid", "Office", "Cafe", "Free"), list.map { it.ssid })
         assertEquals("sae", list.first { it.ssid == "Neighbour" }.encryption)
+        assertEquals("sae-mixed", list.first { it.ssid == "Hybrid" }.encryption)
         assertEquals("psk2", list.first { it.ssid == "Cafe" }.encryption)
         assertEquals("none", list.first { it.ssid == "Free" }.encryption)
         assertEquals(null, list.first { it.ssid == "Office" }.encryption) // enterprise: not offered
@@ -94,21 +112,25 @@ class WifiRadioTest {
             ),
             p.ops
         )
+        assertTrue(p.reloadFirewall)
         assertTrue(p.longWait)
         assertFalse("the password is never shown back", p.lines.any { it.after.contains("coffee-please") })
+        assertTrue(WifiRadio.join("radio0", cafe, "café-wifi-123", wifi, firewall, network) is PlanResult.Ready)
+        assertTrue(WifiRadio.join("radio0", cafe, "0123456789abcdef".repeat(4), wifi, firewall, network) is PlanResult.Ready)
+        assertTrue(WifiRadio.join("radio0", cafe, "é".repeat(32), wifi, firewall, network) is PlanResult.Invalid)
         val office = WifiRadio.parseScan(scanReply).first { it.ssid == "Office" }
         assertTrue(err(WifiRadio.join("radio0", office, "x".repeat(10), wifi, firewall, network)).contains("enterprise", true))
     }
 
     @Test
-    fun leavingRemovesOnlyTheClientLink() {
+    fun leavingRemovesOnlyTheTargetClientLink() {
         val withSta = FeatureMappersTest.uci("""{"lan":{".type":"interface","proto":"static"},"wwan":{".type":"interface","proto":"dhcp"}}""")
         val fw = FeatureMappersTest.uci("""{"cfg02":{".type":"zone","name":"wan","network":["wan","wan6","wwan"]}}""")
         val p = plan(WifiRadio.disconnect("wifinet2", "Cafe", fw, withSta))
+        assertTrue(p.reloadFirewall)
         assertEquals(
             listOf(
-                // Deletes client links only: the router matches mode=sta, so an access point can never be removed.
-                UciOp.DeleteWhere("wireless", "wifi-iface", mapOf("mode" to "sta")),
+                UciOp.Delete("wireless", "wifinet2"),
                 UciOp.Delete("network", "wwan"),
                 UciOp.Set("firewall", "cfg02", mapOf("network" to listOf("wan", "wan6")))
             ),
@@ -138,8 +160,8 @@ class WifiRadioTest {
         assertTrue(ok("delete", args("config" to "network", "section" to "wwan")))
         assertFalse(ok("delete", args("config" to "network", "section" to "lan")))
         assertTrue(ok("delete", args("config" to "wireless", "section" to "radio0", "option" to "txpower")))
+        assertTrue(ok("delete", args("config" to "wireless", "section" to "wifinet2")))
         assertTrue(ok("delete", args("config" to "wireless", "type" to "wifi-iface", "match" to values("mode" to "sta"))))
-        assertFalse("never by name", ok("delete", args("config" to "wireless", "section" to "default_radio0")))
         assertFalse(ok("delete", args("config" to "wireless", "type" to "wifi-iface", "match" to values("mode" to "ap"))))
         assertFalse(ok("delete", args("config" to "wireless", "type" to "wifi-iface", "match" to values("ssid" to "Home"))))
         // Reads: radio names only.

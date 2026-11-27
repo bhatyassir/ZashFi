@@ -16,14 +16,22 @@ covers everything the app uses. Install this file only if:
 
 ## What it allows
 
-- **Read:** router status, Wi-Fi status, device lists, the system log, and the settings for
+- **Read:** router status, Wi-Fi status, device lists, the system log, temperature sensors
+  (`/sys/class/hwmon` and `/sys/class/thermal`, read/list only), and the settings for
   network, DHCP, firewall, DDNS, Dual WAN, UPnP, Smart Queue, VPN, USB sharing and protection
-  packages. It also allows six commands that only print information: vnstat, nlbw, tailscale
-  status (two possible paths), and the package list (apk or opkg).
+  packages. It also allows read-only commands that only print information: vnstat, nlbw, tailscale
+  status (two possible paths), and the package list (`apk info`, `apk list -I`, or `opkg list-installed`).
+- **Sysfs note:** `rpcd` resolves symlinks **before** checking the ACL. The app asks for
+  `/sys/class/hwmon/hwmon*/…`, but the real path is e.g.
+  `/sys/devices/platform/soc/18000000.wifi/ieee80211/phy0/hwmon1/temp1_input` or
+  `/sys/devices/virtual/thermal/thermal_zone0/hwmon0/temp1_input`. Both the `/sys/class/*` and
+  the resolved `/sys/devices/*` patterns are listed; without the latter, temperature reads fail
+  with ubus status 6 and the Home tile shows `—`.
 - **Diagnostics and services (M10b, read only):** the list of services (`rc list`; starting or
-  stopping them is not allowed), and ping, trace route and DNS lookup with exactly the options
-  LuCI's own Diagnostics page uses (`luci-mod-network` ACL and `diagnostics.js`). Only the host
-  name at the end changes; the app accepts only plain host names and IPv4 addresses there.
+  stopping them is not allowed), and ping (`-4` or `-6`), trace route (`-4` or `-6`) and DNS
+  lookup (`/usr/bin/nslookup` or `/bin/nslookup`) with exactly the options LuCI's own Diagnostics
+  page uses (`luci-mod-network` ACL and `diagnostics.js`). Only the host name or IP address at the
+  end changes; the app accepts only plain host names, IPv4 addresses, and IPv6 addresses there.
   The router matches these lines with a `*` at the end, so the app's own check is the narrow one.
 - **Wi-Fi radios and interfaces (phase 2 and 3, read only):** Wi-Fi scan and the channel,
   power and country lists (`iwinfo scan/freqlist/txpowerlist/countrylist`, as LuCI's Wi-Fi page),
@@ -38,6 +46,11 @@ covers everything the app uses. Install this file only if:
   the network config: the LAN is never changed).
 - **Commands:** firewall reload, miniupnpd restart/stop/enable, ddns reload, sqm restart,
   minidlna restart/stop/enable, wake-on-LAN.
+- **Status commands and LED night mode:** read-only process list (`/bin/ps -w`), IPv4/IPv6
+  routes (`/sbin/ip -4 route show`, `/sbin/ip -6 route show`), firewall ruleset
+  (`/usr/sbin/nft list ruleset`), LED night-mode status (`/usr/bin/led-nightmode check`) and
+  the root crontab (`/etc/crontabs/root`, read only). The only new writes are the two
+  owner-confirmed LED actions (`/usr/bin/led-nightmode night`, `/usr/bin/led-nightmode day`).
 - **Phase 4 (owner-approved, each confirmed in the app):** start / stop / restart / enable /
   disable services (`rc init`; the app refuses to stop or disable uhttpd, rpcd, network,
   dnsmasq and firewall), restart the router (`system reboot`, type RESTART), change the root
