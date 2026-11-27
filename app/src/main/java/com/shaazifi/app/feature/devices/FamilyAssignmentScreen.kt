@@ -39,9 +39,11 @@ import com.shaazifi.app.feature.router.LoadStateContent
 import com.shaazifi.app.feature.router.submit
 import com.shaazifi.app.ui.components.Note
 import com.shaazifi.app.ui.components.PageHeading
+import com.shaazifi.app.ui.components.Pill
 import com.shaazifi.app.ui.components.PrimaryButton
 import com.shaazifi.app.ui.components.SfDivider
 import com.shaazifi.app.ui.components.SfListRow
+import com.shaazifi.app.ui.theme.PillTone
 import com.shaazifi.app.ui.theme.SfText
 import com.shaazifi.app.ui.theme.SfTheme
 import kotlinx.coroutines.flow.first
@@ -63,6 +65,7 @@ internal fun FamilyAssignmentScreen(
     var profilesOpen by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val c = SfTheme.colors
+    val makers = rememberMakers()
 
     LaunchedEffect(submitting) {
         if (submitting) {
@@ -80,7 +83,10 @@ internal fun FamilyAssignmentScreen(
         val unassigned = list.devices.filterNot { it.mac in assigned }
         val chosen = unassigned.filter { it.mac in picked && it.network?.sourceZone != null }
         val query = search.trim()
-        val shown = unassigned.filter { d -> listOf(d.name, d.ip, d.mac).any { it.contains(query, true) } }
+        val shown = unassigned.filter { d ->
+            val maker = Makers.label(makers, d.mac).orEmpty()
+            listOf(d.name, d.ip, d.mac, maker).any { it.contains(query, true) }
+        }
 
         Column(Modifier.fillMaxSize().imePadding(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -123,7 +129,9 @@ internal fun FamilyAssignmentScreen(
                     else -> itemsIndexed(shown, key = { _, device -> device.mac }) { index, device ->
                         val eligible = device.network?.sourceZone != null
                         val selected = eligible && device.mac in picked
-                        val kind = DeviceKind.guess(device.name, null)
+                        val maker = Makers.label(makers, device.mac)
+                        val randomized = Makers.isRandomized(device.mac)
+                        val kind = DeviceKind.guess(device.name, maker)
                         if (index != 0) SfDivider()
                         SfListRow(
                             title = device.name,
@@ -131,11 +139,16 @@ internal fun FamilyAssignmentScreen(
                                 .toggleable(value = selected, role = Role.Checkbox, enabled = eligible && !submitting,
                                     onValueChange = { picked = if (it) picked + device.mac else picked - device.mac; problem = null }),
                             subtitle = if (eligible) listOfNotNull(
-                                device.ip.takeIf { it.isNotBlank() && it != device.name }, device.network.label
+                                device.ip.takeIf { it.isNotBlank() && it != device.name },
+                                device.network.label,
+                                maker?.takeUnless { randomized }
                             ).joinToString(" · ") else "Firewall zone unavailable",
                             icon = kind.icon(),
                             hue = kind.hue(),
-                            trailing = { Checkbox(checked = selected, onCheckedChange = null, enabled = eligible) }
+                            trailing = {
+                                if (randomized) Pill("Private MAC", PillTone.Warn)
+                                Checkbox(checked = selected, onCheckedChange = null, enabled = eligible)
+                            }
                         )
                     }
                 }
@@ -144,6 +157,9 @@ internal fun FamilyAssignmentScreen(
             Column(Modifier.background(c.bg), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 SfDivider()
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (chosen.any { Makers.isRandomized(it.mac) }) {
+                        Note("Selected devices with a private MAC address can bypass rules if their address rotates.")
+                    }
                     problem?.let { Text(it, style = SfText.sub, color = c.bad) }
                     PrimaryButton(
                         text = if (chosen.isEmpty()) "Review assignment" else "Review assignment (${chosen.size})",

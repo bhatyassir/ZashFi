@@ -47,6 +47,12 @@ sealed class PendingConfirmation {
         val title: String,
         val message: String
     ) : PendingConfirmation()
+
+    data class ParentalToggle(
+        val enabled: Boolean,
+        val title: String,
+        val message: String
+    ) : PendingConfirmation()
 }
 
 class AdGuardStateHolder(
@@ -114,29 +120,40 @@ class AdGuardStateHolder(
             _state.value = AdGuardUiState.Loaded(dashboard)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: AdGuardError.Unauthorized) {
-            _state.value = AdGuardUiState.WrongPassword(e.message ?: "AdGuard username or password incorrect.")
-        } catch (e: AdGuardError.RateLimited) {
-            _state.value = AdGuardUiState.RateLimited(
-                retryAfterSeconds = e.retryAfterSeconds,
-                message = e.message ?: "Too many failed login attempts. Please wait a while."
-            )
-        } catch (e: AdGuardError.NotAdGuardHome) {
-            _state.value = AdGuardUiState.FeatureNotInstalled(message = e.message ?: "AdGuard Home not installed on this port.")
         } catch (e: Exception) {
-            _state.value = AdGuardUiState.RouterUnreachable(e.message ?: "Could not reach AdGuard Home.")
+            _state.value = mapErrorToState(e)
         }
     }
 
+    private fun mapErrorToState(e: Exception): AdGuardUiState = when (e) {
+        is AdGuardError.Unauthorized ->
+            AdGuardUiState.WrongPassword(e.message ?: "AdGuard username or password incorrect.")
+        is AdGuardError.RateLimited ->
+            AdGuardUiState.RateLimited(
+                retryAfterSeconds = e.retryAfterSeconds,
+                message = e.message ?: "Too many failed login attempts. Please wait a while."
+            )
+        is AdGuardError.NotAdGuardHome ->
+            AdGuardUiState.FeatureNotInstalled(message = e.message ?: "AdGuard Home not installed on this port.")
+        else ->
+            AdGuardUiState.RouterUnreachable(e.message ?: "Could not reach AdGuard Home.")
+    }
+
     fun requestProtectionToggle(enabled: Boolean, durationMs: Long? = null) {
+        val durationLabel = when {
+            durationMs == null -> null
+            durationMs < 60_000L -> "< 1 minute"
+            else -> "${durationMs / 60000L} minutes"
+        }
         val title = when {
             enabled -> "Enable Protection?"
-            durationMs != null -> "Pause Protection for ${durationMs / 60000} Minutes?"
+            durationMs != null && durationMs < 60_000L -> "Pause Protection for < 1 Minute?"
+            durationMs != null -> "Pause Protection for ${durationMs / 60000L} Minutes?"
             else -> "Disable Protection?"
         }
         val message = when {
             enabled -> "AdGuard Home will resume blocking ads, trackers, and malicious domains for all devices."
-            durationMs != null -> "AdGuard Home will stop blocking for ${durationMs / 60000} minutes, then automatically re-enable."
+            durationLabel != null -> "AdGuard Home will stop blocking for $durationLabel, then automatically re-enable."
             else -> "Ads and malicious websites will not be blocked until you turn protection back on."
         }
         _pendingConfirmation.value = PendingConfirmation.ProtectionToggle(enabled, durationMs, title, message)
@@ -152,20 +169,40 @@ class AdGuardStateHolder(
         _pendingConfirmation.value = PendingConfirmation.SafeBrowsingToggle(enabled, title, message)
     }
 
+    fun requestParentalToggle(enabled: Boolean) {
+        val title = if (enabled) "Enable Parental Filter?" else "Disable Parental Filter?"
+        val message = if (enabled) {
+            "Blocks adult websites for all devices on this network."
+        } else {
+            "Turns off adult website filtering."
+        }
+        _pendingConfirmation.value = PendingConfirmation.ParentalToggle(enabled, title, message)
+    }
+
     suspend fun confirmPendingAction() {
         val action = _pendingConfirmation.value ?: return
         _pendingConfirmation.value = null
 
-        when (action) {
-            is PendingConfirmation.ProtectionToggle -> {
-                repository.setProtection(action.enabled, action.durationMs)
-                // Read back real server state: NO optimistic UI
-                refresh()
+        try {
+            when (action) {
+                is PendingConfirmation.ProtectionToggle -> {
+                    repository.setProtection(action.enabled, action.durationMs)
+                    // Read back real server state: NO optimistic UI
+                    refresh()
+                }
+                is PendingConfirmation.SafeBrowsingToggle -> {
+                    repository.setSafeBrowsing(action.enabled)
+                    refresh()
+                }
+                is PendingConfirmation.ParentalToggle -> {
+                    repository.setParental(action.enabled)
+                    refresh()
+                }
             }
-            is PendingConfirmation.SafeBrowsingToggle -> {
-                repository.setSafeBrowsing(action.enabled)
-                refresh()
-            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _state.value = mapErrorToState(e)
         }
     }
 

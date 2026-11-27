@@ -13,6 +13,7 @@ class DemoAdGuardRepository : AdGuardRepository {
     private var protectionEnabled = true
     private var protectionPausedUntilMs = 0L
     private var safeBrowsingEnabled = true
+    private var parentalEnabled = false
     private val queryHistoryStarts = Instant.now().epochSecond - 240
     private val sampleQueries = listOf(
         AdGuardQueryLogItem("", "ads.example.test", "A", "192.0.2.20", "Smart TV", "FilteredBlackList", "2.1",
@@ -84,7 +85,7 @@ class DemoAdGuardRepository : AdGuardRepository {
             ),
             isCleartextHttp = false,
             safeBrowsingEnabled = safeBrowsingEnabled,
-            parentalEnabled = false
+            parentalEnabled = parentalEnabled
         )
     }
 
@@ -129,6 +130,10 @@ class DemoAdGuardRepository : AdGuardRepository {
 
     override suspend fun setSafeBrowsing(enabled: Boolean) {
         safeBrowsingEnabled = enabled
+    }
+
+    override suspend fun setParental(enabled: Boolean) {
+        parentalEnabled = enabled
     }
 }
 

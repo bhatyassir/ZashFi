@@ -198,4 +198,62 @@ class ReconnectProberTest {
         val lastState = states.last()
         assertTrue(lastState is ReconnectState.TimeoutUnreachable)
     }
+
+    @Test
+    fun testProbeDistinguishesSameAddressReconnectWhenCandidateIsNull() = runBlocking {
+        val (sslFactory, cert) = createThrowawayKeyStoreAndCert("sameAddrRouter")
+        val fingerprint = TrustStore.fingerprint(cert)
+
+        val server = MockWebServer()
+        server.useHttps(sslFactory, false)
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"jsonrpc":"2.0","id":1,"result":[]}"""))
+        server.start()
+
+        try {
+            val url = server.url("/").toString()
+            val prober = ReconnectProber(totalDurationSeconds = 10, probeIntervalMs = 50L)
+
+            val states = prober.probe(
+                currentAddress = url,
+                candidateAddress = null,
+                pinnedFingerprint = fingerprint
+            ).toList()
+
+            val lastState = states.last()
+            assertTrue("Expected ReconnectedSameAddress but got $lastState", lastState is ReconnectState.ReconnectedSameAddress)
+            assertEquals(url, (lastState as ReconnectState.ReconnectedSameAddress).address)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testProbeRejects404AndCaptivePortalResponses() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(404).setBody("Not Found"))
+        server.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "http://8.8.8.8/login"))
+        server.enqueue(MockResponse().setResponseCode(200).addHeader("Content-Type", "text/html").setBody("<html>Captive Portal</html>"))
+        server.start()
+
+        try {
+            var fakeClock = 0L
+            val prober = ReconnectProber(
+                totalDurationSeconds = 2,
+                probeIntervalMs = 10L,
+                elapsedRealtimeMs = { fakeClock.also { fakeClock += 1_000L } }
+            )
+            val url = server.url("/").newBuilder().host("127.0.0.1").build().toString()
+
+            val states = prober.probe(
+                currentAddress = url,
+                candidateAddress = null,
+                pinnedFingerprint = "HTTP_NO_PIN"
+            ).toList()
+
+            val lastState = states.last()
+            assertTrue("404 and captive portal responses must not count as reconnected: $lastState", lastState is ReconnectState.TimeoutUnreachable)
+        } finally {
+            server.shutdown()
+        }
+    }
 }

@@ -1,6 +1,7 @@
 package com.shaazifi.app.ui.theme
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 
@@ -22,6 +23,7 @@ enum class SfHue(val light: Pair<Long, Long>, val dark: Pair<Long, Long>) {
 
     /** (strong, soft) for the current theme. */
     @Composable
+    @ReadOnlyComposable
     fun colors(): Pair<Color, Color> {
         val dark = SfTheme.colors.bg.luminance() < 0.3f
         val (fg, bg) = if (dark) this.dark else light

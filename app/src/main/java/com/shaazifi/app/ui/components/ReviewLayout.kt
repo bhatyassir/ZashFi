@@ -25,12 +25,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.shaazifi.app.ui.icons.SfIcons
 import com.shaazifi.app.ui.theme.PillTone
-import com.shaazifi.app.ui.theme.SfDisplayFont
 import com.shaazifi.app.ui.theme.SfHue
 import com.shaazifi.app.ui.theme.SfText
 import com.shaazifi.app.ui.theme.SfTheme
@@ -57,16 +57,11 @@ internal fun PageHeading(
 }
 
 @Composable
-internal fun SectionTitle(title: String, modifier: Modifier = Modifier) {
-    Text(title, modifier = modifier, style = MaterialTheme.typography.titleLarge, color = SfTheme.colors.ink)
-}
-
-@Composable
 internal fun PageLink(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, back: Boolean = false) {
     val c = SfTheme.colors
     Row(
         modifier.clip(RoundedCornerShape(6.dp)).clickable(role = Role.Button, onClick = onClick)
-            .heightIn(min = 42.dp).padding(horizontal = 2.dp),
+            .heightIn(min = 48.dp).padding(horizontal = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -112,8 +107,12 @@ internal fun HistoryRange(minutes: Int, onRange: (Int) -> Unit) {
             val selected = minutes == range
             Box(
                 Modifier.clip(RoundedCornerShape(6.dp)).background(if (selected) c.line else c.sunk)
-                    .clickable(role = Role.Tab) { onRange(range) }.semantics { this.selected = selected }
-                    .heightIn(min = 35.dp).padding(horizontal = 8.dp),
+                    .clickable(role = Role.Tab) { onRange(range) }
+                    .semantics {
+                        this.selected = selected
+                        stateDescription = if (selected) "Selected" else "Not selected"
+                    }
+                    .heightIn(min = 48.dp).padding(horizontal = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text("$range min", color = if (selected) c.ink else c.muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -132,14 +131,16 @@ internal fun TrafficReading(label: String, reading: String, color: Color) {
         "kbit/s" -> "Kbps"
         "bit/s" -> "bps"
         else -> suffix
-    }
+    }.ifBlank { null }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(label, style = MaterialTheme.typography.bodySmall, color = c.muted)
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(value, fontFamily = SfDisplayFont, fontWeight = FontWeight.Bold, fontSize = 34.sp, color = color)
-            if (unit.isNotBlank()) Text(unit, style = MaterialTheme.typography.bodySmall, color = c.muted,
-                modifier = Modifier.padding(bottom = 4.dp))
-        }
+        BigNumber(
+            value = value,
+            unit = unit,
+            color = color,
+            valueStyle = MaterialTheme.typography.displayLarge,
+            unitStyle = MaterialTheme.typography.bodySmall
+        )
     }
 }
 
@@ -158,7 +159,8 @@ internal fun WifiNetworkCard(
     val shape = RoundedCornerShape(13.dp)
     Column(
         modifier.clip(shape).background(c.sunk).border(1.dp, c.line, shape)
-            .clickable(onClickLabel = "View $name", onClick = onClick).padding(10.dp),
+            .heightIn(min = 48.dp)
+            .clickable(role = Role.Button, onClickLabel = "View $name", onClick = onClick).padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {

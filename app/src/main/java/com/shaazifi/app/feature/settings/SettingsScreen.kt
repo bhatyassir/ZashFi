@@ -37,11 +37,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.shaazifi.app.data.RouterProfile
+import com.shaazifi.app.feature.alerts.AlertScheduler
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(
@@ -55,19 +59,18 @@ fun SettingsScreen(
     /** App lock and saved passwords (M9). */
     securitySection: @Composable () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var showForgetConfirmation by remember { mutableStateOf(false) }
 
-    // AdGuard Home configuration state
-    // Stored flag kept as is; nothing in the app reads it yet, so it is not shown as a switch.
-    val adguardEnabled = profile.adguardEnabled
-    var hostInput by remember(profile) { mutableStateOf(profile.adguardHost ?: "") }
-    var portInput by remember(profile) { mutableStateOf(profile.adguardPort?.toString() ?: "") }
-    var protocolInput by remember(profile) { mutableStateOf(profile.adguardProtocol ?: "http") }
-    var usernameInput by remember(profile) { mutableStateOf(profile.adguardUsername) }
-    var saveSuccessMessage by remember { mutableStateOf<String?>(null) }
-    var saveErrorMessage by remember { mutableStateOf<String?>(null) }
-    var isSaving by remember { mutableStateOf(false) }
+    // AdGuard Home configuration state — keyed on profile.id so VPN updates never wipe typed edits.
+    var hostInput by remember(profile.id) { mutableStateOf(profile.adguardHost ?: "") }
+    var portInput by remember(profile.id) { mutableStateOf(profile.adguardPort?.toString() ?: "") }
+    var protocolInput by remember(profile.id) { mutableStateOf(profile.adguardProtocol ?: "http") }
+    var usernameInput by remember(profile.id) { mutableStateOf(profile.adguardUsername) }
+    var saveSuccessMessage by remember(profile.id) { mutableStateOf<String?>(null) }
+    var saveErrorMessage by remember(profile.id) { mutableStateOf<String?>(null) }
+    var isSaving by remember(profile.id) { mutableStateOf(false) }
 
     val c = SfTheme.colors
     Column(
@@ -114,6 +117,7 @@ fun SettingsScreen(
                 onValueChange = {
                     hostInput = it
                     saveSuccessMessage = null
+                    saveErrorMessage = null
                 },
                 label = { Text("Address (optional)") },
                 placeholder = { Text("Router address") },
@@ -126,6 +130,7 @@ fun SettingsScreen(
                 onValueChange = {
                     portInput = it
                     saveSuccessMessage = null
+                    saveErrorMessage = null
                 },
                 label = { Text("Port (optional)") },
                 placeholder = { Text("3000") },
@@ -143,6 +148,7 @@ fun SettingsScreen(
                         onClick = {
                             protocolInput = option
                             saveSuccessMessage = null
+                            saveErrorMessage = null
                         }
                     )
                 }
@@ -152,6 +158,7 @@ fun SettingsScreen(
                 onValueChange = {
                     usernameInput = it
                     saveSuccessMessage = null
+                    saveErrorMessage = null
                 },
                 label = { Text("AdGuard user name") },
                 placeholder = { Text("admin") },
@@ -167,27 +174,25 @@ fun SettingsScreen(
                         isSaving = true
                         saveSuccessMessage = null
                         saveErrorMessage = null
-                        val portInt = portInput.trim().toIntOrNull()
-                        val updated = try {
-                            settingsHandler.updateAdGuardConfig(
+                        when (
+                            val result = settingsHandler.saveAdGuardAddress(
                                 profileId = profile.id,
-                                enabled = adguardEnabled,
                                 host = hostInput,
-                                port = portInt,
+                                portText = portInput,
                                 protocol = protocolInput,
+                                allowBlank = true,
                                 username = usernameInput
                             )
-                        } catch (e: Exception) {
-                            saveErrorMessage = "Could not save: ${e::class.simpleName}."
-                            null
+                        ) {
+                            is AdGuardAddressSaveResult.Saved -> {
+                                onProfileUpdated(result.profile)
+                                saveSuccessMessage = "AdGuard Home settings saved."
+                            }
+                            is AdGuardAddressSaveResult.Error -> {
+                                saveErrorMessage = result.message
+                            }
                         }
                         isSaving = false
-                        if (updated != null) {
-                            onProfileUpdated(updated)
-                            saveSuccessMessage = "AdGuard Home settings saved."
-                        } else if (saveErrorMessage == null) {
-                            saveErrorMessage = "Could not save: this router is not in the saved list."
-                        }
                     }
                 }
             )
@@ -233,8 +238,11 @@ fun SettingsScreen(
                     onClick = {
                         showForgetConfirmation = false
                         coroutineScope.launch {
-                            settingsHandler.forgetRouter(profile.id, profile.address)
-                            onForgetRouter()
+                            withContext(NonCancellable) {
+                                runCatching { AlertScheduler.stop(context) }
+                                onForgetRouter()
+                                settingsHandler.forgetRouter(profile.id, profile.address)
+                            }
                         }
                     }
                 ) { Text("Forget", color = c.bad) }

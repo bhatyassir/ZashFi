@@ -27,6 +27,12 @@ object ReconnectDisplay {
             pill = "Connected",
             tone = PillTone.Ok
         )
+        is ReconnectState.ReconnectedSameAddress -> Copy(
+            title = "Back in touch",
+            body = "$routerName answered with the same security certificate.",
+            pill = "Connected",
+            tone = PillTone.Ok
+        )
         is ReconnectState.ReconnectedRolledBack -> Copy(
             title = "Old settings restored",
             body = "The router did not answer at the new address, so it went back to its previous settings. Nothing was lost.",

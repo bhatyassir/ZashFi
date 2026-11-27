@@ -2,6 +2,9 @@ package com.shaazifi.app.feature.home
 
 import com.shaazifi.app.core.ubus.UbusClient
 import com.shaazifi.app.core.ubus.UbusError
+import com.shaazifi.app.feature.router.RouterReader
+import com.shaazifi.app.feature.router.ThermalSensor
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -55,6 +58,7 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
             "system" to "board",
             "system" to "info",
             "file" to "read",
+            "file" to "list",
             "network.interface" to "dump",
             "network.device" to "status",
             "network.wireless" to "status",
@@ -72,9 +76,14 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
                     args.isEmpty()
             }
             if ((ubusObject to method) !in FIXED_CALLS) return false
-            if (ubusObject == "file") {
+            if (ubusObject == "file" && method == "read") {
                 val path = args["path"] as? JsonPrimitive
-                return args.size == 1 && path != null && path.isString && path.content == PROC_STAT_PATH
+                return args.size == 1 && path != null && path.isString &&
+                    (path.content == PROC_STAT_PATH || RouterReader.isAllowedThermalReadPath(path.content))
+            }
+            if (ubusObject == "file" && method == "list") {
+                val path = args["path"] as? JsonPrimitive
+                return args.size == 1 && path != null && path.isString && RouterReader.isAllowedFileList(path.content)
             }
             if (ubusObject == "iwinfo") {
                 val device = args["device"] as? JsonPrimitive
@@ -86,6 +95,9 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
 
     private val noArgs = buildJsonObject {}
 
+    /** Cached board info for this repository session (static hardware/firmware identity). */
+    @Volatile private var cachedBoard: BoardInfo? = null
+
     /** The internet port's device name from the last full reading. */
     @Volatile private var wanDevice: String? = null
 
@@ -94,6 +106,7 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
         return try {
             HomeParsers.parseDeviceCounters(send("network.device", "status"), device)
         } catch (e: IOException) {
+            if (isConnectionProblem(e)) throw HomeLoadException.Unreachable()
             null
         }
     }
@@ -110,18 +123,38 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
      * A call the screen cannot work without.
      * [sessionGate] marks the first call: any signed-in session may make it, so
      * "access denied" there can only mean the session is no longer valid.
+     * When [sessionGate] is false (including post-cache refreshes), `AccessDenied` or
+     * `SessionExpired` probes `system.board` so an expired session is never misreported
+     * as `NotPermitted` or `FeatureNotInstalled`.
      */
     private suspend fun required(ubusObject: String, method: String, sessionGate: Boolean): JsonObject {
         try {
             return send(ubusObject, method)
         } catch (e: IOException) {
-            throw when {
-                isConnectionProblem(e) -> HomeLoadException.Unreachable()
-                e is UbusError.SessionExpired -> HomeLoadException.SessionExpired()
-                e is UbusError.AccessDenied ->
-                    if (sessionGate) HomeLoadException.SessionExpired() else HomeLoadException.NotPermitted()
-                else -> HomeLoadException.FeatureNotInstalled()
+            if (isConnectionProblem(e)) throw HomeLoadException.Unreachable()
+            if (sessionGate) {
+                throw when (e) {
+                    is UbusError.SessionExpired, is UbusError.AccessDenied -> HomeLoadException.SessionExpired()
+                    else -> HomeLoadException.FeatureNotInstalled()
+                }
             }
+            if (e is UbusError.AccessDenied || e is UbusError.SessionExpired) {
+                try {
+                    send("system", "board")
+                } catch (gateErr: IOException) {
+                    cachedBoard = null
+                    if (isConnectionProblem(gateErr)) throw HomeLoadException.Unreachable()
+                    if (gateErr is UbusError.AccessDenied || gateErr is UbusError.SessionExpired) {
+                        throw HomeLoadException.SessionExpired()
+                    }
+                }
+                throw if (e is UbusError.AccessDenied) {
+                    HomeLoadException.NotPermitted()
+                } else {
+                    HomeLoadException.FeatureNotInstalled()
+                }
+            }
+            throw HomeLoadException.FeatureNotInstalled()
         }
     }
 
@@ -141,8 +174,22 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
         }
     }
 
+    private suspend fun listThermalDir(path: String): List<String>? {
+        val reply = optional("file", "list", buildJsonObject { put("path", path) }) ?: return null
+        val entries = reply["entries"] as? JsonArray ?: return emptyList()
+        return entries.mapNotNull { entry ->
+            ((entry as? JsonObject)?.get("name") as? JsonPrimitive)?.takeIf { it.isString }?.content
+        }
+    }
+
+    private suspend fun readThermalFile(path: String): String? {
+        val reply = optional("file", "read", buildJsonObject { put("path", path) }) ?: return null
+        return (reply["data"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    }
+
     override suspend fun load(): HomeReading {
-        val board = HomeParsers.parseBoard(required("system", "board", sessionGate = true))
+        val board = cachedBoard
+            ?: HomeParsers.parseBoard(required("system", "board", sessionGate = true)).also { cachedBoard = it }
         val info = required("system", "info", sessionGate = false)
         val dump = required("network.interface", "dump", sessionGate = false)
         val wan = HomeParsers.parseWan(dump)
@@ -151,6 +198,8 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
         val procStat = optional("file", "read", buildJsonObject { put("path", PROC_STAT_PATH) })
         val procStatText = (procStat?.get("data") as? JsonPrimitive)?.takeIf { it.isString }?.content
         val cpu = procStatText?.let { HomeParsers.parseCpuSample(it) }
+
+        val thermals: List<ThermalSensor> = RouterReader.readThermalsWith(::listThermalDir, ::readThermalFile)
 
         val deviceStatus = optional("network.device", "status")
         val counters = deviceStatus?.let { HomeParsers.parseDeviceCounters(it, wan.device) }
@@ -196,7 +245,8 @@ class UbusHomeRepository(private val caller: UbusCaller) : HomeRepository {
             wanCounters = counters,
             notices = notices,
             interfaces = HomeParsers.parseInterfaces(dump),
-            radios = radios
+            radios = radios,
+            thermals = thermals
         )
     }
 

@@ -114,9 +114,10 @@ private fun onOff(b: Boolean?) = when (b) { true -> ON; false -> OFF; null -> nu
 
 private val DOMAIN = Regex("^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
 
-private fun days(ms: Long?): String {
-    if (ms == null) return "Unknown"
-    val h = ms / 3_600_000
+private fun days(interval: Long?): String {
+    if (interval == null) return "Unknown"
+    if (interval in 1..3650) return if (interval == 1L) "1 day" else "$interval days"
+    val h = interval / 3_600_000
     return if (h < 24) "$h hours" else "${h / 24} days"
 }
 
@@ -160,6 +161,20 @@ object AgChanges {
 
 object AgPages {
 
+    private fun AdGuardError.HttpError.isMissingEndpoint(): Boolean =
+        statusCode == 404 || statusCode == 405
+
+    private suspend fun getWithFallback(
+        caller: AdGuardCaller,
+        primary: String,
+        fallback: String
+    ): Pair<JsonObject, Boolean> = try {
+        (caller.get(primary).obj() ?: JsonObject(emptyMap())) to false
+    } catch (e: AdGuardError.HttpError) {
+        if (!e.isMissingEndpoint()) throw e
+        (caller.get(fallback).obj() ?: JsonObject(emptyMap())) to true
+    }
+
     suspend fun load(page: AgPage, c: AdGuardCaller): AgView = when (page) {
         AgPage.FILTERS -> filters(c.get("/filtering/status").obj() ?: JsonObject(emptyMap()))
         AgPage.RULES -> rules(c.get("/filtering/status").obj() ?: JsonObject(emptyMap()))
@@ -168,7 +183,11 @@ object AgPages {
         AgPage.ACCESS -> access(c.get("/access/list").obj() ?: JsonObject(emptyMap()))
         AgPage.REWRITES -> rewrites(c.get("/rewrite/list").arr() ?: JsonArray(emptyList()), runCatching { c.get("/rewrite/settings").obj() }.getOrNull())
         AgPage.DNS -> dns(c.get("/dns_info").obj() ?: JsonObject(emptyMap()))
-        AgPage.LOGS -> logsStats(c.get("/querylog/config").obj() ?: JsonObject(emptyMap()), c.get("/stats/config").obj() ?: JsonObject(emptyMap()))
+        AgPage.LOGS -> {
+            val (q, legacyQ) = getWithFallback(c, "/querylog/config", "/querylog_info")
+            val (s, legacyS) = getWithFallback(c, "/stats/config", "/stats_info")
+            logsStats(q, s, legacyQueryLog = legacyQ, legacyStats = legacyS)
+        }
         AgPage.SAFESEARCH -> safeSearch(c.get("/safesearch/status").obj() ?: JsonObject(emptyMap()))
     }
 
@@ -228,6 +247,10 @@ object AgPages {
             actions = listOf(
                 AgAction("Update blocklists now", "Update all blocklists now?", "AdGuard Home downloads the newest version of every blocklist.", needsConfirm = true) { c ->
                     val r = c.send("POST", "/filtering/refresh", buildJsonObject { put("whitelist", false) })
+                    "Updated ${r.obj()?.get("updated").long() ?: 0} lists."
+                },
+                AgAction("Update allowlists now", "Update all allowlists now?", "AdGuard Home downloads the newest version of every allowlist.", needsConfirm = true) { c ->
+                    val r = c.send("POST", "/filtering/refresh", buildJsonObject { put("whitelist", true) })
                     "Updated ${r.obj()?.get("updated").long() ?: 0} lists."
                 },
                 AgAction(
@@ -293,9 +316,7 @@ object AgPages {
 
     fun services(all: JsonObject, current: JsonObject): AgView {
         val blocked = current["ids"].strings()
-        val schedule = current["schedule"] ?: JsonObject(emptyMap())
         val list = all["blocked_services"].arr()?.mapNotNull { it.obj() }.orEmpty()
-        fun update(ids: List<String>) = buildJsonObject { put("ids", strArray(ids)); put("schedule", schedule) }
         val rows = list.map { s ->
             val id = s["id"].str().orEmpty()
             val name = s["name"].str().orEmpty().ifBlank { id }
@@ -303,7 +324,15 @@ object AgPages {
             AgRow(name, toggle = on, sub = s["group_id"].str(),
                 onToggle = AgAction(if (on) "Unblock" else "Block", "${if (on) "Unblock" else "Block"} $name?",
                     if (on) "$name works again on every device." else "Every device stops reaching $name.") { c ->
-                    c.send("PUT", "/blocked_services/update", update(if (on) blocked - id else blocked + id)); null
+                    val latest = c.get("/blocked_services/get").obj() ?: current
+                    val latestBlocked = latest["ids"].strings()
+                    val latestSchedule = latest["schedule"].obj()
+                    val updatedIds = if (on) latestBlocked - id else (latestBlocked + id).distinct()
+                    c.send("PUT", "/blocked_services/update", buildJsonObject {
+                        put("ids", strArray(updatedIds))
+                        latestSchedule?.let { put("schedule", it) }
+                    })
+                    null
                 })
         }.sortedWith(compareByDescending<AgRow> { it.toggle == true }.thenBy { it.label.lowercase() })
         return AgView(
@@ -364,28 +393,50 @@ object AgPages {
         fun set(a: List<String>, d: List<String>, h: List<String>) = buildJsonObject {
             put("allowed_clients", strArray(a)); put("disallowed_clients", strArray(d)); put("blocked_hosts", strArray(h))
         }
-        fun rows(items: List<String>, kind: String, remove: (String) -> JsonObject) = items.map { x ->
-            AgRow(x, mono = true, extra = AgAction("Remove", "Remove $x from $kind?", "", destructive = true) { c -> c.send("POST", "/access/set", remove(x)); null })
+        suspend fun updateAccess(
+            c: AdGuardCaller,
+            transform: (List<String>, List<String>, List<String>) -> JsonObject
+        ) {
+            val latest = c.get("/access/list").obj() ?: list
+            c.send(
+                "POST",
+                "/access/set",
+                transform(
+                    latest["allowed_clients"].strings(),
+                    latest["disallowed_clients"].strings(),
+                    latest["blocked_hosts"].strings()
+                )
+            )
+        }
+        fun rows(items: List<String>, kind: String, remove: (List<String>, List<String>, List<String>, String) -> JsonObject) = items.map { x ->
+            AgRow(x, mono = true, extra = AgAction("Remove", "Remove $x from $kind?", "", destructive = true) { c ->
+                updateAccess(c) { a, d, h -> remove(a, d, h, x) }
+                null
+            })
         }
         return AgView(
             summary = if (allowed.isNotEmpty()) "Only the allowed clients may use AdGuard Home." else "${disallowed.size} clients refused, ${hosts.size} names refused.",
             sections = listOf(
-                AgSection("Allowed clients (only these may ask)", rows(allowed, "allowed clients") { set(allowed - it, disallowed, hosts) }, "Not used: every client may ask."),
-                AgSection("Refused clients", rows(disallowed, "refused clients") { set(allowed, disallowed - it, hosts) }, "None."),
-                AgSection("Refused names", rows(hosts, "refused names") { set(allowed, disallowed, hosts - it) }, "None.")
+                AgSection("Allowed clients (only these may ask)", rows(allowed, "allowed clients") { a, d, h, x -> set(a - x, d, h) }, "Not used: every client may ask."),
+                AgSection("Refused clients", rows(disallowed, "refused clients") { a, d, h, x -> set(a, d - x, h) }, "None."),
+                AgSection("Refused names", rows(hosts, "refused names") { a, d, h, x -> set(a, d, h - x) }, "None.")
             ),
             forms = listOf(
                 AgForm("Refuse a client", listOf(FormField("id", "IP, CIDR or ClientID")), "Refuse") { v ->
                     val id = v["id"].orEmpty().trim()
                     if (id.isEmpty() || id.any { it.isWhitespace() }) AgBuild.Invalid("Type one address.")
                     else AgBuild.Ready(AgAction("Refuse", "Refuse $id?", "AdGuard Home stops answering this client. If it is this phone or the router, DNS stops working for it.", destructive = true) { c ->
-                        c.send("POST", "/access/set", set(allowed, disallowed + id, hosts)); null
+                        updateAccess(c) { a, d, h -> set(a, (d + id).distinct(), h) }
+                        null
                     })
                 },
                 AgForm("Refuse a name", listOf(FormField("host", "Name", hint = "example.org")), "Refuse") { v ->
                     val h = v["host"].orEmpty().trim()
                     if (h.isEmpty() || h.any { it.isWhitespace() }) AgBuild.Invalid("Type one name.")
-                    else AgBuild.Ready(AgAction("Refuse", "Refuse questions for $h?", "") { c -> c.send("POST", "/access/set", set(allowed, disallowed, hosts + h)); null })
+                    else AgBuild.Ready(AgAction("Refuse", "Refuse questions for $h?", "") { c ->
+                        updateAccess(c) { a, d, hostsNow -> set(a, d, (hostsNow + h).distinct()) }
+                        null
+                    })
                 }
             ),
             note = "Allowed clients are shown but not added here: one wrong entry stops DNS for every other device. Use AdGuard Home's own page for that."
@@ -460,17 +511,56 @@ object AgPages {
         )
     }
 
-    // ---- Log and statistics (/querylog/config, /stats/config; PUT updates; clear and reset)
+    // ---- Log and statistics (/querylog/config, /stats/config; v0.107.0-v0.107.29 /querylog_info, /stats_info)
 
-    fun logsStats(q: JsonObject, s: JsonObject): AgView {
+    fun logsStats(
+        q: JsonObject,
+        s: JsonObject,
+        legacyQueryLog: Boolean = false,
+        legacyStats: Boolean = false
+    ): AgView {
+        suspend fun sendConfigUpdate(
+            c: AdGuardCaller,
+            readPath: String,
+            fallbackReadPath: String,
+            modernWritePath: String,
+            legacyWritePath: String,
+            isLegacy: Boolean,
+            fallbackValue: JsonObject,
+            mutate: (JsonObject, Boolean) -> JsonObject
+        ) {
+            val (latest, detectedLegacy) = if (isLegacy) {
+                (c.get(fallbackReadPath).obj() ?: fallbackValue) to true
+            } else {
+                getWithFallback(c, readPath, fallbackReadPath)
+            }
+            if (detectedLegacy) {
+                c.send("POST", legacyWritePath, mutate(latest, true))
+            } else {
+                try {
+                    c.send("PUT", modernWritePath, mutate(latest, false))
+                } catch (e: AdGuardError.HttpError) {
+                    if (!e.isMissingEndpoint()) throw e
+                    c.send("POST", legacyWritePath, mutate(latest, true))
+                }
+            }
+        }
         fun toggleQ(key: String, label: String) = q[key].bool()?.let { on ->
             AgAction(if (on) "Turn off" else "Turn on", "${if (on) "Turn off" else "Turn on"}: $label?", "") { c ->
-                c.send("PUT", "/querylog/config/update", q.with(key, JsonPrimitive(!on))); null
+                sendConfigUpdate(
+                    c, "/querylog/config", "/querylog_info",
+                    "/querylog/config/update", "/querylog_config", legacyQueryLog, q
+                ) { latest, _ -> latest.with(key, JsonPrimitive(!on)) }
+                null
             }
         }
         fun toggleS(key: String, label: String) = s[key].bool()?.let { on ->
             AgAction(if (on) "Turn off" else "Turn on", "${if (on) "Turn off" else "Turn on"}: $label?", "") { c ->
-                c.send("PUT", "/stats/config/update", s.with(key, JsonPrimitive(!on))); null
+                sendConfigUpdate(
+                    c, "/stats/config", "/stats_info",
+                    "/stats/config/update", "/stats_config", legacyStats, s
+                ) { latest, _ -> latest.with(key, JsonPrimitive(!on)) }
+                null
             }
         }
         val rows = listOf(
@@ -480,20 +570,32 @@ object AgPages {
             AgRow("Statistics", toggle = s["enabled"].bool(), onToggle = toggleS("enabled", "statistics")),
             AgRow("Keep statistics", days(s["interval"].long()))
         )
-        fun retention(title: String, path: String, base: JsonObject, allowedDays: List<Int>) =
-            AgForm(title, listOf(FormField("days", "Days (${allowedDays.joinToString(", ")})", numeric = true)), "Save") { v ->
-                val d = v["days"].orEmpty().trim().toIntOrNull()
-                if (d == null || d !in allowedDays) AgBuild.Invalid("Choose one of ${allowedDays.joinToString(", ")} days.")
-                else AgBuild.Ready(AgAction("Save", "$title: $d days?", "Older entries are removed.") { c ->
-                    c.send("PUT", path, base.with("interval", JsonPrimitive(d * 86_400_000L))); null
-                })
-            }
+        fun retention(
+            title: String,
+            readPath: String,
+            fallbackReadPath: String,
+            modernWritePath: String,
+            legacyWritePath: String,
+            isLegacy: Boolean,
+            base: JsonObject,
+            allowedDays: List<Int>
+        ) = AgForm(title, listOf(FormField("days", "Days (${allowedDays.joinToString(", ")})", numeric = true)), "Save") { v ->
+            val d = v["days"].orEmpty().trim().toIntOrNull()
+            if (d == null || d !in allowedDays) AgBuild.Invalid("Choose one of ${allowedDays.joinToString(", ")} days.")
+            else AgBuild.Ready(AgAction("Save", "$title: $d days?", "Older entries are removed.") { c ->
+                sendConfigUpdate(c, readPath, fallbackReadPath, modernWritePath, legacyWritePath, isLegacy, base) { latest, useLegacy ->
+                    val intervalValue = if (useLegacy) d.toLong() else d * 86_400_000L
+                    latest.with("interval", JsonPrimitive(intervalValue))
+                }
+                null
+            })
+        }
         return AgView(
             summary = "What AdGuard Home keeps about DNS questions.",
             sections = listOf(AgSection("Settings", rows)),
             forms = listOf(
-                retention("Keep query log", "/querylog/config/update", q, listOf(1, 7, 30, 90)),
-                retention("Keep statistics", "/stats/config/update", s, listOf(1, 7, 30, 90))
+                retention("Keep query log", "/querylog/config", "/querylog_info", "/querylog/config/update", "/querylog_config", legacyQueryLog, q, listOf(1, 7, 30, 90)),
+                retention("Keep statistics", "/stats/config", "/stats_info", "/stats/config/update", "/stats_config", legacyStats, s, listOf(1, 7, 30, 90))
             ),
             actions = listOf(
                 AgAction("Clear query log", "Clear the whole query log?", "Every logged question is deleted. This cannot be undone.", destructive = true) { c ->
@@ -506,7 +608,7 @@ object AgPages {
         )
     }
 
-    // ---- Safe search (/safesearch/status; PUT /safesearch/settings with the whole object)
+    // ---- Safe search (/safesearch/status; PUT /safesearch/settings or v0.107.0-v0.107.29 POST /safesearch/enable|disable)
 
     fun safeSearch(status: JsonObject): AgView {
         val names = linkedMapOf("enabled" to "Safe search", "google" to "Google", "bing" to "Bing", "duckduckgo" to "DuckDuckGo",
@@ -514,7 +616,15 @@ object AgPages {
         val rows = names.mapNotNull { (k, label) ->
             val on = status[k].bool() ?: return@mapNotNull null
             AgRow(label, toggle = on, onToggle = AgAction(if (on) "Turn off" else "Turn on", "${if (on) "Turn off" else "Turn on"} $label safe search?", "") { c ->
-                c.send("PUT", "/safesearch/settings", status.with(k, JsonPrimitive(!on))); null
+                val latest = c.get("/safesearch/status").obj() ?: status
+                val targetOn = !on
+                try {
+                    c.send("PUT", "/safesearch/settings", latest.with(k, JsonPrimitive(targetOn)))
+                } catch (e: AdGuardError.HttpError) {
+                    if (!e.isMissingEndpoint()) throw e
+                    c.send("POST", if (targetOn) "/safesearch/enable" else "/safesearch/disable")
+                }
+                null
             })
         }
         return AgView(
@@ -551,22 +661,46 @@ class AgPageHolder(
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
     suspend fun refresh() {
-        _state.value = try {
-            AgState.Loaded(AgPages.load(page, caller))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: AdGuardError.Unauthorized) {
-            AgState.Failed("Sign in to AdGuard Home first (on the AdGuard screen).", needsPassword = true)
-        } catch (e: AdGuardError) {
-            AgState.Failed(e.message ?: "AdGuard Home did not answer.")
-        } catch (e: Exception) {
-            AgState.Failed("Could not read this page (${e::class.simpleName}).")
+        val wasBusy = _busy.value
+        _busy.value = true
+        try {
+            _state.value = try {
+                AgState.Loaded(AgPages.load(page, caller))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: AdGuardError.Unauthorized) {
+                AgState.Failed("Sign in to AdGuard Home first (on the AdGuard screen).", needsPassword = true)
+            } catch (e: AdGuardError) {
+                AgState.Failed(e.message ?: "AdGuard Home did not answer.")
+            } catch (e: Exception) {
+                AgState.Failed("Could not read this page (${e::class.simpleName}).")
+            }
+        } finally {
+            if (!wasBusy) _busy.value = false
         }
     }
 
     suspend fun request(action: AgAction) {
         _message.value = null
         if (action.needsConfirm) _pending.value = action else run(action)
+    }
+
+    /** Bulk DNS rewrites: export as text, or import by adding/removing only the changed rows. */
+    suspend fun exportRewrites(): String = caller.exportRewrites()
+
+    suspend fun importRewrites(text: String): String {
+        val parsed = com.shaazifi.app.feature.adguard.manage.parse(text)
+        if (parsed.errors.isNotEmpty()) return "Fix ${parsed.errors.size} line(s) before importing: ${parsed.errors.first()}"
+        val current = runCatching { (caller.get("/rewrite/list") as? JsonArray).orEmpty().mapNotNull { el ->
+            val domain = (el as? JsonObject)?.get("domain") as? JsonPrimitive
+            val answer = (el as? JsonObject)?.get("answer") as? JsonPrimitive
+            if (domain?.isString == true && answer?.isString == true)
+                com.shaazifi.app.feature.adguard.manage.RewriteRule(domain.content, answer.content) else null
+        } }.getOrElse { emptyList() }
+        val change = com.shaazifi.app.feature.adguard.manage.diff(current, parsed.rules)
+        val count = caller.applyBulk(change)
+        refresh()
+        return "Updated $count rewrite(s)."
     }
 
     fun dismiss() { _pending.value = null }

@@ -1,5 +1,6 @@
 package com.shaazifi.app.feature.home
 
+import com.shaazifi.app.feature.router.ThermalSensor
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
@@ -30,7 +31,8 @@ class HomeStateHolderTest {
         cpu: CpuSample? = CpuSample(100, 1000),
         rx: Long = 1_000_000,
         tx: Long = 100_000,
-        uptime: Long = 68100
+        uptime: Long = 68100,
+        thermals: List<ThermalSensor> = emptyList()
     ) = HomeReading(
         board = BoardInfo("Example Router X1", "Device-1", "OpenWrt SNAPSHOT r1"),
         uptimeSec = uptime,
@@ -38,7 +40,8 @@ class HomeStateHolderTest {
         cpu = cpu,
         wan = WanStatus(true, "static", "wan", "198.51.100.2", "198.51.100.3", 64384),
         clients = ClientSummary(17, 0, 17, true),
-        wanCounters = TrafficCounters(rx, tx)
+        wanCounters = TrafficCounters(rx, tx),
+        thermals = thermals
     )
 
     private fun dashboardOf(state: HomeUiState): HomeDashboard = when (state) {
@@ -117,6 +120,53 @@ class HomeStateHolderTest {
         assertEquals(ClientSummary(9, 7, 2, true), d.clients)
         assertEquals(3, d.cpuUsedPct)
         assertTrue(d.downloadBps!! > 0.0)
+        assertEquals(3, d.thermals.size)
+        assertEquals(53.0, d.primaryTempC!!, 0.001)
+    }
+
+    @Test
+    fun testDashboardExposesThermalsAndPeakPrimaryTemp() = runTest {
+        val sensors = listOf(
+            ThermalSensor("hwmon0", "cpu_thermal", "CPU / SoC", 49.4),
+            ThermalSensor("hwmon1", "mt7915_phy0", "2.4 GHz Wi-Fi", 62.5)
+        )
+        val holder = HomeStateHolder(ScriptedRepository(listOf(reading(thermals = sensors))), nowMs = { testScheduler.currentTime })
+        holder.refresh()
+        val d = dashboardOf(holder.state.value)
+        assertEquals(sensors, d.thermals)
+        assertEquals(62.5, d.primaryTempC!!, 0.001)
+    }
+
+    @Test
+    fun testFastCounterUnreachableMarksStaleWhileMissingCountersAreIgnored() = runTest {
+        val base = reading()
+        var counterOutcome: Any? = null
+        val repo = object : HomeRepository {
+            override suspend fun load(): HomeReading = base
+            override suspend fun loadCounters(): TrafficCounters? = when (val c = counterOutcome) {
+                is Exception -> throw c
+                else -> c as TrafficCounters?
+            }
+        }
+        val holder = HomeStateHolder(repo, nowMs = { testScheduler.currentTime })
+        val job = launch { holder.pollWhileActive() }
+        runCurrent()
+        advanceTimeBy(HomeStateHolder.SECOND_SAMPLE_DELAY_MS)
+        runCurrent()
+        assertFalse(dashboardOf(holder.state.value).stale)
+
+        // Missing counters (null) do not mark stale.
+        counterOutcome = null
+        advanceTimeBy(HomeStateHolder.FAST_SAMPLE_MS)
+        runCurrent()
+        assertFalse(dashboardOf(holder.state.value).stale)
+
+        // Unreachable during fast counter read marks stale immediately.
+        counterOutcome = HomeLoadException.Unreachable()
+        advanceTimeBy(HomeStateHolder.FAST_SAMPLE_MS)
+        runCurrent()
+        assertTrue(dashboardOf(holder.state.value).stale)
+        job.cancel()
     }
 
     @Test

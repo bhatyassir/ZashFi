@@ -1,6 +1,8 @@
 package com.shaazifi.app.feature.guestqr
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.view.WindowManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -33,8 +35,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.shaazifi.app.feature.router.ChangeController
+import com.shaazifi.app.feature.router.ChoiceChips
 import com.shaazifi.app.feature.router.FeatureLoadException
+
 import com.shaazifi.app.ui.components.GhostButton
+import com.shaazifi.app.ui.components.Note
 import com.shaazifi.app.ui.components.Pill
 import com.shaazifi.app.ui.components.PrimaryButton
 import com.shaazifi.app.ui.components.SfCard
@@ -50,7 +56,10 @@ import kotlinx.coroutines.launch
  * blocked (FLAG_SECURE). A Kotlin String cannot be wiped from memory; it is simply not kept.
  */
 @Composable
-fun GuestQrCard(load: suspend () -> List<GuestCredential>) {
+fun GuestQrCard(
+    load: suspend () -> List<GuestCredential>,
+    onSessionExpired: (() -> Unit)? = null
+) {
     val c = SfTheme.colors
     val scope = rememberCoroutineScope()
     var creds by remember { mutableStateOf<List<GuestCredential>?>(null) }
@@ -84,6 +93,11 @@ fun GuestQrCard(load: suspend () -> List<GuestCredential>) {
                     try {
                         val list = load()
                         if (list.isEmpty()) message = "No guest network on this router yet." else creds = list
+                    } catch (e: FeatureLoadException.SessionExpired) {
+                        message = "Your router session has expired. Sign in again to read the guest network."
+                        onSessionExpired?.invoke()
+                    } catch (e: FeatureLoadException.NotPermitted) {
+                        message = "This router login does not have permission to read the guest Wi-Fi password."
                     } catch (e: FeatureLoadException) {
                         message = "Could not read the guest network. Check the connection and try again."
                     } catch (e: Exception) {
@@ -104,13 +118,21 @@ fun GuestQrCard(load: suspend () -> List<GuestCredential>) {
             }
         }
         val g = shown[index.coerceIn(0, shown.lastIndex)]
-        Text(g.ssid, style = MaterialTheme.typography.titleMedium, color = c.ink)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(g.ssid, style = MaterialTheme.typography.titleMedium, color = c.ink, modifier = Modifier.weight(1f))
+            Pill(if (g.enabled) "Enabled" else "Disabled", tone = if (g.enabled) PillTone.Ok else PillTone.Off)
+        }
+        if (!g.enabled) {
+            Note("This guest network is currently turned off. Turn it on before visitors scan this code.")
+        }
         if (g.qrType == null) {
             Text(
                 "This guest network uses a security type that a QR code cannot share (enterprise or enhanced open). Visitors join it by name.",
                 style = SfText.sub,
                 color = c.muted
             )
+        } else if (g.qrType != "nopass" && g.key.isNullOrEmpty()) {
+            Note("The guest Wi-Fi password was not returned by the router, so a QR code cannot be generated.")
         } else {
             val matrix = remember(g) { GuestQr.matrix(GuestQr.payload(g)) }
             Box(
@@ -149,13 +171,75 @@ fun GuestQrCard(load: suspend () -> List<GuestCredential>) {
     }
 }
 
+/**
+ * Time-limited guest access. A pass is kept only in memory while this card is on screen;
+ * when it expires, the owner can turn the guest network off with one tap through the normal
+ * confirmation. The router has no built-in guest timer, so a pass cannot survive app restarts.
+ */
+@Composable
+fun GuestExpiryCard(load: suspend () -> List<GuestCredential>, changes: ChangeController?) {
+    val c = SfTheme.colors
+    val scope = rememberCoroutineScope()
+    var duration by remember { mutableStateOf("2h") }
+    var pass by remember { mutableStateOf<com.shaazifi.app.feature.guestqr.GuestPass?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 10.dp) {
+        Text("Time-limited guest access", style = MaterialTheme.typography.titleMedium, color = c.ink)
+        Text("Set a pass; when it ends, turn the guest network off in one tap.", style = SfText.sub, color = c.muted)
+        ChoiceChips(listOf("30m", "1h", "2h", "6h", "12h", "1d", "7d"), false, duration) { duration = it }
+        PrimaryButton("Start ${duration} guest pass", onClick = {
+            val ms = com.shaazifi.app.feature.guestqr.parseDuration(duration)
+            if (ms == null) {
+                message = "Choose a valid duration."
+            } else {
+                scope.launch {
+                    val guests = runCatching { load() }.getOrNull().orEmpty()
+                    val guest = guests.firstOrNull()
+                    if (guest == null) {
+                        message = "No guest network was found on this router."
+                    } else {
+                        val section = "guest_radio0"
+                        val start = System.currentTimeMillis()
+                        pass = com.shaazifi.app.feature.guestqr.GuestPass(section, guest.ssid, start + ms, start)
+                        message = com.shaazifi.app.feature.guestqr.summarise(pass, start)
+                        now = start
+                    }
+                }
+            }
+        })
+        pass?.let { p ->
+            now = System.currentTimeMillis()
+            Text(com.shaazifi.app.feature.guestqr.summarise(p, now), style = SfText.sub, color = if (p.isExpired(now)) c.bad else c.muted)
+            if (p.isExpired(now) && changes != null) {
+                PrimaryButton("Turn the guest network off", onClick = {
+                    val result = com.shaazifi.app.feature.guestqr.buildDisablePlan(p.sectionId, p.ssid)
+                    if (result is com.shaazifi.app.feature.router.PlanResult.Ready) changes.request(result.plan)
+                })
+            }
+            GhostButton("Forget this pass", onClick = { pass = null; message = null })
+        }
+        message?.let { Text(it, style = SfText.sub, color = c.bad) }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 /** Blocks screenshots and the recent-apps preview while composed. */
 @Composable
 private fun SecureWindow() {
     val context = LocalContext.current
     DisposableEffect(Unit) {
-        val window = (context as? Activity)?.window
+        val window = context.findActivity()?.window
+        val hadSecure = ((window?.attributes?.flags ?: 0) and WindowManager.LayoutParams.FLAG_SECURE) != 0
         window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+        onDispose {
+            if (!hadSecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 }

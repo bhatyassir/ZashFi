@@ -29,14 +29,17 @@ data class Device(
     val reserveId: String? = null,
     /** firewall `rule` section blocking this device, if any. */
     val blockId: String? = null,
-    val network: DeviceNetwork? = null
+    val network: DeviceNetwork? = null,
+    /** Explicit custom name configured in UCI `dhcp.host`, if any. */
+    val customName: String? = null
 )
 
 data class DeviceList(
     val devices: List<Device>,
     val wifiKnown: Boolean,
     val accessRules: List<AccessRule>? = null,
-    val wifiClients: Map<String, Set<String>> = emptyMap()
+    val wifiClients: Map<String, Set<String>> = emptyMap(),
+    val extraEgressZones: List<String> = emptyList()
 ) {
     val online: Int get() = devices.count { it.online }
 }
@@ -80,7 +83,16 @@ object DevicesParsers {
         dhcp: UciConfig?,
         firewall: UciConfig?
     ): DeviceList {
-        data class Acc(var name: String = "", var ip: String = "", var online: Boolean = false, var fixedIp: String? = null, var blocked: Boolean = false, var reserveId: String? = null, var blockId: String? = null)
+        data class Acc(
+            var name: String = "",
+            var ip: String = "",
+            var online: Boolean = false,
+            var fixedIp: String? = null,
+            var blocked: Boolean = false,
+            var reserveId: String? = null,
+            var blockId: String? = null,
+            var customName: String? = null
+        )
         val byMac = LinkedHashMap<String, Acc>()
         fun acc(mac: String) = byMac.getOrPut(mac.uppercase(Locale.ROOT)) { Acc() }
 
@@ -98,9 +110,11 @@ object DevicesParsers {
             val lease = el as? JsonObject ?: continue
             val mac = lease["macaddr"].str() ?: continue
             if (!MAC.matches(mac)) continue
+            val expires = (lease["expires"] as? JsonPrimitive)?.doubleOrNull
+            if (expires != null && expires <= 0.0) continue
             val a = acc(mac)
-            lease["ipaddr"].str()?.let { a.ip = it; a.online = true }
-            lease["hostname"].str()?.takeIf { it != "*" }?.let { a.name = it }
+            lease["ipaddr"].str()?.let { if (a.ip.isEmpty()) a.ip = it }
+            lease["hostname"].str()?.takeIf { it != "*" }?.let { if (a.name.isEmpty()) a.name = it }
         }
         wifiByMac.keys.filter(MAC::matches).forEach { acc(it).online = true }
         for (s in dhcp?.ofType("host").orEmpty()) {
@@ -109,7 +123,12 @@ object DevicesParsers {
             a.fixedIp = s.opt("ip")?.takeIf { it.isNotBlank() }
             a.reserveId = s.id
             if (a.ip.isEmpty()) a.ip = s.opt("ip") ?: ""
-            if (a.name.isEmpty()) a.name = s.opt("name") ?: ""
+            val hostName = s.opt("name")?.takeIf { it.isNotBlank() }
+            if (hostName != null) {
+                // Explicit custom UCI dhcp.host names take precedence over DHCP lease/hint names.
+                a.name = hostName
+                a.customName = hostName
+            }
         }
         val rules = firewall?.let(AccessRule::parse)
         for (rule in rules.orEmpty()) {
@@ -119,6 +138,9 @@ object DevicesParsers {
                 if (rule.family == null && (a.blockId == null || rule.enabled)) a.blockId = rule.id
             }
         }
+        val extraEgress = firewall?.ofType("zone")?.mapNotNull { z ->
+            z.opt("name")?.takeIf { n -> n != "lan" && n != "wan" && (n.startsWith("wan") || z.flag("masq", false)) }
+        }?.distinct().orEmpty()
 
         val devices = byMac.map { (mac, a) ->
             val conn = wifiByMac[mac] ?: when {
@@ -126,14 +148,14 @@ object DevicesParsers {
                 wifiKnown -> Connection.WIRED
                 else -> Connection.UNKNOWN
             }
-            Device(mac, a.name.ifBlank { a.ip.ifBlank { mac } }, a.ip, a.online, conn, a.fixedIp, a.blocked, a.reserveId, a.blockId)
+            Device(mac, a.name.ifBlank { a.ip.ifBlank { mac } }, a.ip, a.online, conn, a.fixedIp, a.blocked, a.reserveId, a.blockId, customName = a.customName)
         }.sortedWith(
             compareBy<Device> { !it.blocked }
                 .thenBy { it.fixedIp == null }
                 .thenBy { !it.online }
                 .thenBy { it.name.lowercase(Locale.ROOT) }
         )
-        return DeviceList(devices, wifiKnown, rules)
+        return DeviceList(devices, wifiKnown, rules, extraEgressZones = extraEgress)
     }
 
     /** `hostapd.<if> get_clients` reply: `{"freq": 5745, "clients": {<mac>: {...}}}` (fixture m7_hostapd_*). */

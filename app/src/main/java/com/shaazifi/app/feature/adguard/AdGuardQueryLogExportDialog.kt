@@ -1,6 +1,9 @@
 package com.shaazifi.app.feature.adguard
 
+import android.app.Activity
 import android.content.ClipData
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,6 +27,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,22 +58,33 @@ internal fun AdGuardQueryLogExportDialog(
     val coroutineScope = rememberCoroutineScope()
     val canFilter = currentFilter.search.isNotBlank() || currentFilter.result != AgQueryFilter.ALL
     val device = currentFilter.device
-    var scope by remember {
+    var scope by rememberSaveable {
         mutableStateOf(when {
             canFilter -> ExportScope.FILTERS
             device != null -> ExportScope.DEVICE
             else -> ExportScope.ALL
         })
     }
-    var format by remember { mutableStateOf(QueryLogExportFormat.CSV) }
+    var format by rememberSaveable { mutableStateOf(QueryLogExportFormat.CSV) }
     var exporting by remember { mutableStateOf(false) }
     var count by remember { mutableLongStateOf(0L) }
-    var completed by remember { mutableStateOf<QueryLogExport?>(null) }
-    var shareStarted by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var completedPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var completedCount by rememberSaveable { mutableLongStateOf(0L) }
+    var shareStarted by rememberSaveable { mutableStateOf(false) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    val completed = remember(completedPath, completedCount) {
+        completedPath?.let { path ->
+            File(path).takeIf { it.isFile }?.let { QueryLogExport(it, completedCount) }
+        }
+    }
 
     DisposableEffect(Unit) {
-        onDispose { if (!shareStarted) completed?.file?.delete() }
+        onDispose {
+            val changingConfig = context.findActivity()?.isChangingConfigurations == true
+            if (!changingConfig && !shareStarted) {
+                completedPath?.let { File(it).delete() }
+            }
+        }
     }
 
     AlertDialog(
@@ -131,9 +146,11 @@ internal fun AdGuardQueryLogExportDialog(
                         count = 0L
                         coroutineScope.launch {
                             try {
-                                completed = reader.export(File(context.cacheDir, "adguard-exports"), filter, format) {
+                                val exported = reader.export(File(context.cacheDir, "adguard-exports"), filter, format) {
                                     withContext(Dispatchers.Main.immediate) { count = it }
                                 }
+                                completedPath = exported.file.absolutePath
+                                completedCount = exported.count
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (failure: Exception) {
@@ -184,4 +201,10 @@ private fun ExportChoice(label: String, selected: Boolean, onSelect: () -> Unit)
         RadioButton(selected = selected, onClick = null)
         Text(label, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

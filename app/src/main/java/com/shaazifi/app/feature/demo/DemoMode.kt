@@ -27,9 +27,9 @@ object DemoMode {
     /** The demo router, or an older profile whose name contains "Demo". */
     fun isDemo(p: RouterProfile): Boolean = p.id == PROFILE_ID || p.name.contains("Demo", ignoreCase = true)
 
-    /** Pages under More that need a real router are closed in demo mode. */
+    /** Pages under More that need a real router or saved router state are closed in demo mode. */
     fun pageAvailable(page: MorePage): Boolean = when (page) {
-        is MorePage.Feature, MorePage.Diagnostics, MorePage.About, MorePage.Activity, MorePage.AllDevices -> true
-        is MorePage.RouterPages, MorePage.Settings -> false
+        is MorePage.Feature, MorePage.Diagnostics, MorePage.About, MorePage.Activity -> true
+        is MorePage.RouterPages, MorePage.Settings, MorePage.AllDevices -> false
     }
 }

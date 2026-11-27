@@ -1,6 +1,8 @@
 package com.shaazifi.app.feature.home
 
 import com.shaazifi.app.core.ubus.UbusError
+import com.shaazifi.app.feature.router.RouterReader
+import com.shaazifi.app.feature.router.ThermalSensor
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -159,9 +161,8 @@ class UbusHomeRepositoryTest {
         val caller = workingRouter()
         UbusHomeRepository(caller).load()
         val fileCalls = caller.calls.filter { it.first == "file" }
-        assertEquals(1, fileCalls.size)
-        assertEquals("read", fileCalls[0].second)
-        assertEquals(buildJsonObject { put("path", "/proc/stat") }, fileCalls[0].third)
+        assertTrue(fileCalls.any { it.second == "read" && it.third == buildJsonObject { put("path", "/proc/stat") } })
+        assertTrue(fileCalls.all { UbusHomeRepository.isAllowedCall(it.first, it.second, it.third) })
     }
 
     @Test
@@ -240,5 +241,82 @@ class UbusHomeRepositoryTest {
         assertNull(reading.cpu)
         assertNull(reading.wanCounters)
         assertEquals(86, reading.memUsedPct)
+    }
+
+    @Test
+    fun testSystemBoardIsCachedAndPostCacheAccessDeniedProbesSession() = runBlocking {
+        val caller = workingRouter()
+        val repo = UbusHomeRepository(caller)
+        repo.load()
+        repo.load()
+        assertEquals(1, caller.calls.count { it.first == "system" && it.second == "board" })
+
+        // Session expires before the 3rd refresh: system.info fails with AccessDenied, probe system.board also fails -> SessionExpired
+        caller.fail("system info", UbusError.AccessDenied())
+        caller.fail("system board", UbusError.AccessDenied())
+        try {
+            repo.load()
+            fail("expected SessionExpired")
+        } catch (_: HomeLoadException.SessionExpired) {
+        }
+
+        // Post-gate ubus code 4 (SessionExpired) while system.board still succeeds -> FeatureNotInstalled
+        val missingFeature = workingRouter()
+        missingFeature.fail("network.interface dump", UbusError.SessionExpired())
+        assertTrue(loadFailure(missingFeature) is HomeLoadException.FeatureNotInstalled)
+    }
+
+    @Test
+    fun testLoadsThermalsIntoHomeReading() = runBlocking {
+        val caller = object : UbusCaller {
+            val base = workingRouter()
+            val thermalFiles = mapOf(
+                "/sys/class/hwmon/hwmon0/name" to "cpu_thermal\n",
+                "/sys/class/hwmon/hwmon0/temp1_input" to "49274\n",
+                "/sys/class/hwmon/hwmon1/name" to "mt7915_phy0\n",
+                "/sys/class/hwmon/hwmon1/temp1_input" to "51000\n"
+            )
+            override suspend fun call(ubusObject: String, method: String, args: JsonObject): JsonObject {
+                if (ubusObject == "file" && method == "list" &&
+                    (args["path"] as kotlinx.serialization.json.JsonPrimitive).content == "/sys/class/hwmon"
+                ) {
+                    return Json.parseToJsonElement("""{"entries":[{"name":"hwmon0"},{"name":"hwmon1"}]}""").jsonObject
+                }
+                if (ubusObject == "file" && method == "read") {
+                    val p = (args["path"] as kotlinx.serialization.json.JsonPrimitive).content
+                    thermalFiles[p]?.let { return buildJsonObject { put("data", it) } }
+                    if (p != "/proc/stat") throw UbusError.ObjectNotFound()
+                }
+                return base.call(ubusObject, method, args)
+            }
+        }
+        val reading = UbusHomeRepository(caller).load()
+        assertEquals(
+            listOf(
+                ThermalSensor("hwmon0", "cpu_thermal", "CPU / SoC", 49.274),
+                ThermalSensor("hwmon1", "mt7915_phy0", "2.4 GHz Wi-Fi", 51.0)
+            ),
+            reading.thermals
+        )
+    }
+
+    @Test
+    fun testLoadCountersDistinguishesUnreachableFromMissing() = runBlocking {
+        val caller = workingRouter()
+        val repo = UbusHomeRepository(caller)
+        repo.load()
+
+        caller.fail("network.device status", UbusError.ObjectNotFound())
+        assertNull(repo.loadCounters())
+
+        caller.fail("network.device status", UbusError.AccessDenied())
+        assertNull(repo.loadCounters())
+
+        caller.fail("network.device status", UbusError.NetworkError(IOException("timeout")))
+        try {
+            repo.loadCounters()
+            fail("expected Unreachable")
+        } catch (_: HomeLoadException.Unreachable) {
+        }
     }
 }

@@ -24,6 +24,7 @@ class ReconnectDisplayTest {
         assertEquals(PillTone.Off, probing.tone)
 
         assertEquals(PillTone.Ok, ReconnectDisplay.copy(ReconnectState.ReconnectedKept("https://192.168.1.1"), "R").tone)
+        assertEquals(PillTone.Ok, ReconnectDisplay.copy(ReconnectState.ReconnectedSameAddress("https://192.168.1.1"), "R").tone)
         assertEquals(PillTone.Warn, ReconnectDisplay.copy(ReconnectState.ReconnectedRolledBack("https://192.168.1.1"), "R").tone)
         assertEquals(PillTone.Bad, ReconnectDisplay.copy(ReconnectState.CertificateChanged("AA"), "R").tone)
         assertEquals(PillTone.Bad, ReconnectDisplay.copy(ReconnectState.TimeoutUnreachable, "R").tone)
@@ -31,6 +32,7 @@ class ReconnectDisplayTest {
         listOf(
             ReconnectState.Probing(1, 1),
             ReconnectState.ReconnectedKept("a"),
+            ReconnectState.ReconnectedSameAddress("a"),
             ReconnectState.ReconnectedRolledBack("a"),
             ReconnectState.CertificateChanged("AA"),
             ReconnectState.TimeoutUnreachable

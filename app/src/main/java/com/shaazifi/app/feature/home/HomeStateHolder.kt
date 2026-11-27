@@ -71,6 +71,9 @@ class HomeStateHolder(
             repository.loadCounters()
         } catch (e: CancellationException) {
             throw e
+        } catch (e: HomeLoadException.Unreachable) {
+            onUnreachable()
+            return
         } catch (e: Exception) {
             null
         } ?: return
@@ -186,7 +189,9 @@ class HomeStateHolder(
             notices = reading.notices,
             stale = false,
             interfaces = reading.interfaces,
-            radios = reading.radios
+            radios = reading.radios,
+            thermals = reading.thermals,
+            primaryTempC = reading.thermals.maxOfOrNull { it.tempCelsius }
         )
     }
 }

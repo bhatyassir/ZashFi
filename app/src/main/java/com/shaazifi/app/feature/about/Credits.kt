@@ -14,19 +14,19 @@ data class Credit(
  * LICENSE file). Every licence here is compatible with ShaaziFi's GPL-3.0.
  */
 object Credits {
-    val entries: List<Credit> = listOf(
+    fun entries(appName: String): List<Credit> = listOf(
         Credit("OpenWrt", "The OpenWrt Project", "GPL-2.0-or-later", "https://openwrt.org",
-            "The router system ZashFi talks to (ubus, rpcd, uci, fw4)."),
+            "The router system $appName talks to (ubus, rpcd, uci, fw4)."),
         Credit("LuCI", "The OpenWrt Project and LuCI contributors", "Apache-2.0", "https://github.com/openwrt/luci",
             "Reference for router calls, page addresses and diagnostics (luci-rpc, access lists, menus)."),
         Credit("UnTangled", "Krish Paul", "GPL-2.0-or-later", "https://github.com/bidhata/untangled",
-            "The web interface ZashFi was first built around; reference for features and router calls."),
+            "The web interface $appName was first built around; reference for features and router calls."),
         Credit("LuCI Mobile", "cogwheel0 and contributors", "GPL-3.0", "https://github.com/cogwheel0/luci-mobile",
             "Reference for features and router calls (Wi-Fi scan, services, interfaces, capability checks)."),
         Credit("OpenWrtManager", "hagaygo", "GPL-3.0", "https://github.com/hagaygo/OpenWrtManager",
             "Early inspiration for LuCI Mobile, credited by it; acknowledged here too."),
         Credit("AdGuard Home", "AdGuard Software Ltd", "GPL-3.0", "https://github.com/AdguardTeam/AdGuardHome",
-            "The ad blocker ZashFi manages; API definition and server code used as the reference."),
+            "The ad blocker $appName manages; API definition and server code used as the reference."),
         Credit("AdGuard Home Manager", "JGeek00", "Apache-2.0", "https://github.com/JGeek00/adguard-home-manager",
             "Reference list of AdGuard Home features and API calls."),
         Credit("Wireshark (device maker list)", "The Wireshark developers; data from the IEEE Registration Authority", "GPL-2.0-or-later",
@@ -39,4 +39,6 @@ object Credits {
         Credit("Bricolage Grotesque", "The Bricolage Grotesque Project Authors", "OFL-1.1", "https://github.com/ateliertriay/bricolage", "Heading font."),
         Credit("IBM Plex Sans and Mono", "IBM Corp.", "OFL-1.1", "https://github.com/IBM/plex", "Text and number fonts.")
     )
+
+    val entries: List<Credit> = entries("ZashFi")
 }

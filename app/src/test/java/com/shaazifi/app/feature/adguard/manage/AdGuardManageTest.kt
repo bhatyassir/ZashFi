@@ -2,6 +2,7 @@ package com.shaazifi.app.feature.adguard.manage
 
 import com.shaazifi.app.core.adguard.AdGuardCaller
 import com.shaazifi.app.core.adguard.AdGuardEndpoints
+import com.shaazifi.app.core.adguard.AdGuardError
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -23,15 +24,20 @@ class AdGuardManageTest {
     private fun j(s: String): JsonElement = Json.parseToJsonElement(s)
 
     /** Answers GETs from [replies]; records every write. */
-    private class FakeCaller(private val replies: Map<String, String>) : AdGuardCaller {
+    private class FakeCaller(
+        private val replies: Map<String, String>,
+        private val onSend: (String, String, JsonElement?) -> Unit = { _, _, _ -> }
+    ) : AdGuardCaller {
         val sent = mutableListOf<Triple<String, String, String?>>()
         val reads = mutableListOf<String>()
         override suspend fun get(path: String, query: Map<String, String>): JsonElement {
             reads += path
-            return Json.parseToJsonElement(replies[path] ?: error("no reply for $path"))
+            val raw = replies[path] ?: throw AdGuardError.HttpError(404, "no reply for $path")
+            return Json.parseToJsonElement(raw)
         }
         override suspend fun send(method: String, path: String, body: JsonElement?): JsonElement? {
             sent += Triple(method, path, body?.toString())
+            onSend(method, path, body)
             return null
         }
     }
@@ -105,14 +111,17 @@ class AdGuardManageTest {
         val get = j("""{"ids":["tiktok"],"schedule":{"time_zone":"Local"}}""").jsonObject
         val rows = AgPages.services(all, get).sections.flatMap { it.rows }
         assertEquals(true, rows.first { it.label == "TikTok" }.toggle)
-        val caller = FakeCaller(emptyMap())
+        val caller = FakeCaller(mapOf("/blocked_services/get" to """{"ids":["tiktok"],"schedule":{"time_zone":"Local"}}"""))
         rows.first { it.label == "YouTube" }.onToggle!!.perform(caller)
         assertEquals(Triple("PUT", "/blocked_services/update", """{"ids":["tiktok","youtube"],"schedule":{"time_zone":"Local"}}"""), caller.sent.single())
     }
 
     @Test
     fun rewritesAccessListAndSafeSearch() = runBlocking {
-        val caller = FakeCaller(emptyMap())
+        val caller = FakeCaller(mapOf(
+            "/access/list" to """{"allowed_clients":[],"disallowed_clients":["10.0.0.9"],"blocked_hosts":["version.bind"]}""",
+            "/safesearch/status" to """{"enabled":true,"bing":true,"duckduckgo":true,"ecosia":true,"google":true,"pixabay":true,"yandex":true,"youtube":false}"""
+        ))
         val rw = AgPages.rewrites(j("""[{"domain":"nas.lan","answer":"192.168.1.20","enabled":true}]""").let { it as kotlinx.serialization.json.JsonArray }, j("""{"enabled":true}""").jsonObject)
         rw.sections.flatMap { it.rows }.first { it.label == "nas.lan" }.extra!!.perform(caller)
         assertEquals(Triple("POST", "/rewrite/delete", """{"domain":"nas.lan","answer":"192.168.1.20","enabled":true}"""), caller.sent.single())
@@ -134,10 +143,12 @@ class AdGuardManageTest {
 
     @Test
     fun logAndStatisticsSettingsKeepOtherFields() = runBlocking {
-        val q = j("""{"enabled":true,"interval":7776000000,"anonymize_client_ip":false,"ignored":["a.lan"],"ignored_enabled":true}""").jsonObject
-        val s = j("""{"enabled":true,"interval":86400000,"ignored":[],"ignored_enabled":false}""").jsonObject
+        val qStr = """{"enabled":true,"interval":7776000000,"anonymize_client_ip":false,"ignored":["a.lan"],"ignored_enabled":true}"""
+        val sStr = """{"enabled":true,"interval":86400000,"ignored":[],"ignored_enabled":false}"""
+        val q = j(qStr).jsonObject
+        val s = j(sStr).jsonObject
         val v = AgPages.logsStats(q, s)
-        val caller = FakeCaller(emptyMap())
+        val caller = FakeCaller(mapOf("/querylog/config" to qStr, "/stats/config" to sStr))
         v.sections.flatMap { it.rows }.first { it.label == "Hide client addresses" }.onToggle!!.perform(caller)
         assertEquals(Triple("PUT", "/querylog/config/update",
             """{"enabled":true,"interval":7776000000,"anonymize_client_ip":true,"ignored":["a.lan"],"ignored_enabled":true}"""), caller.sent.single())
@@ -182,5 +193,73 @@ class AdGuardManageTest {
     fun queryLogStatusFilterUsesTheServersValues() {
         // AdGuard Home internal/querylog/deprecated.go (master): accepted response_status values.
         assertEquals(listOf("all", "filtered", "blocked", "whitelisted", "rewritten", "processed"), AgQueryFilter.entries.map { it.value })
+    }
+
+    @Test
+    fun servicesGuardsMissingScheduleAndRefetchesBeforeWrite() = runBlocking {
+        val all = j("""{"blocked_services":[{"id":"tiktok","name":"TikTok"},{"id":"youtube","name":"YouTube"}]}""").jsonObject
+        val initialGet = j("""{"ids":["tiktok"],"schedule":null}""").jsonObject
+        val rows = AgPages.services(all, initialGet).sections.flatMap { it.rows }
+        val caller = FakeCaller(mapOf("/blocked_services/get" to """{"ids":["tiktok","steam"]}"""))
+
+        rows.first { it.label == "YouTube" }.onToggle!!.perform(caller)
+        assertEquals(
+            Triple("PUT", "/blocked_services/update", """{"ids":["tiktok","steam","youtube"]}"""),
+            caller.sent.single()
+        )
+    }
+
+    @Test
+    fun accessRefetchesLatestListsBeforeWrite() = runBlocking {
+        val initial = j("""{"allowed_clients":[],"disallowed_clients":["10.0.0.9"],"blocked_hosts":[]}""").jsonObject
+        val v = AgPages.access(initial)
+        val caller = FakeCaller(mapOf(
+            "/access/list" to """{"allowed_clients":["192.168.1.2"],"disallowed_clients":["10.0.0.9"],"blocked_hosts":["a.test"]}"""
+        ))
+        val refuseForm = v.forms.first { it.title == "Refuse a name" }.build(mapOf("host" to "b.test")) as AgBuild.Ready
+        refuseForm.action.perform(caller)
+        assertEquals(
+            Triple("POST", "/access/set", """{"allowed_clients":["192.168.1.2"],"disallowed_clients":["10.0.0.9"],"blocked_hosts":["a.test","b.test"]}"""),
+            caller.sent.single()
+        )
+    }
+
+    @Test
+    fun logsAndSafeSearchFallbackToLegacyEndpoints() = runBlocking {
+        val caller = FakeCaller(
+            replies = mapOf(
+                "/querylog_info" to """{"enabled":true,"interval":7,"anonymize_client_ip":false}""",
+                "/stats_info" to """{"enabled":true,"interval":30}""",
+                "/safesearch/status" to """{"enabled":false}"""
+            ),
+            onSend = { method, path, _ ->
+                if (method == "PUT" && path == "/safesearch/settings") {
+                    throw AdGuardError.HttpError(404, "Not Found")
+                }
+            }
+        )
+        val logsView = AgPages.load(AgPage.LOGS, caller)
+        assertTrue(logsView.sections.first().rows.any { it.label == "Keep query log" && it.value == "7 days" })
+        val retention = logsView.forms.first { it.title == "Keep query log" }.build(mapOf("days" to "30")) as AgBuild.Ready
+        retention.action.perform(caller)
+        assertEquals(
+            Triple("POST", "/querylog_config", """{"enabled":true,"interval":30,"anonymize_client_ip":false}"""),
+            caller.sent.single()
+        )
+
+        caller.sent.clear()
+        val ssView = AgPages.load(AgPage.SAFESEARCH, caller)
+        ssView.sections.first().rows.first { it.label == "Safe search" }.onToggle!!.perform(caller)
+        assertEquals("POST", caller.sent.last().first)
+        assertEquals("/safesearch/enable", caller.sent.last().second)
+    }
+
+    @Test
+    fun filtersIncludesAllowlistRefreshAction() = runBlocking {
+        val v = AgPages.filters(j(filtering).jsonObject)
+        val caller = FakeCaller(emptyMap())
+        val allowRefresh = v.actions.first { it.label == "Update allowlists now" }
+        allowRefresh.perform(caller)
+        assertEquals(Triple("POST", "/filtering/refresh", """{"whitelist":true}"""), caller.sent.single())
     }
 }

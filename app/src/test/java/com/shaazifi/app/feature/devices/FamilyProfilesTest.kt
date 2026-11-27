@@ -2,6 +2,7 @@ package com.shaazifi.app.feature.devices
 
 import com.shaazifi.app.feature.demo.DemoRouterChanges
 import com.shaazifi.app.feature.router.ChangeOutcome
+import com.shaazifi.app.feature.router.FeatureChanges
 import com.shaazifi.app.feature.router.FeatureView
 import com.shaazifi.app.feature.router.LoadHolder
 import com.shaazifi.app.feature.router.LoadState
@@ -94,5 +95,49 @@ class FamilyProfilesTest {
         val unmatched = DemoDevices.copy(devices = listOf(tablet.copy(ip = "198.51.100.30"))).withNetworks(dump, fw)
         assertNull(unmatched.devices.single().network)
         assertTrue(addressSortKey("192.168.1.9") < addressSortKey("192.168.1.12"))
+    }
+
+    @Test
+    fun removingLastMemberDeletesAllProfileRulesIncludingOrphans() {
+        val rules = DemoDevices.accessRules.orEmpty()
+        val profile = familyProfiles(rules, emptyList()).single()
+        val singleMemberProfile = profile.copy(
+            rules = profile.rules.filter { it.mac == "02:00:00:00:00:04" }
+        )
+        val plan = (FamilyChanges.removeMember(singleMemberProfile, "02:00:00:00:00:04", "Kid's tablet") as PlanResult.Ready).plan
+        assertEquals(singleMemberProfile.rules.map { UciOp.Delete("firewall", it.id) }, plan.ops)
+    }
+
+    @Test
+    fun scheduleValidationRejectsEqualStartAndStopTimesAndUsesDeviceZone() {
+        val rules = DemoDevices.accessRules.orEmpty()
+        val profile = familyProfiles(rules, emptyList()).single()
+        assertTrue(FamilyChanges.addSchedule(profile, "", "21:00", "21:00") is PlanResult.Invalid)
+        assertTrue(FamilyChanges.addSchedule(profile, "", "9:00", "09:00") is PlanResult.Invalid)
+
+        val raw = FeatureChanges.parentalSchedule("02:00:00:00:00:05", "", "09:00", "09:00", mapOf("02:00:00:00:00:05" to "Printer"))
+        assertTrue(validateScheduleTimes(raw) is PlanResult.Invalid)
+
+        val studioPrinter = DemoDevices.devices.first { it.name == "Printer" }
+        val pause = (changeInternet(studioPrinter, emptyList()) as PlanResult.Ready).plan
+        val add = pause.ops.single() as UciOp.Add
+        assertEquals("studio", add.values["src"])
+    }
+
+    @Test
+    fun accessRuleParsesIndividualRulesOnNonLanZones() {
+        val fw = UciConfig(listOf(
+            UciSection("r1", "rule", mapOf(
+                "name" to listOf("Parental: Guest tablet"),
+                "src" to listOf("guest"),
+                "dest" to listOf("wan"),
+                "src_mac" to listOf("02:00:00:00:00:55"),
+                "target" to listOf("REJECT"),
+                "enabled" to listOf("1")
+            ))
+        ))
+        val parsed = AccessRule.parse(fw)
+        assertEquals(1, parsed.size)
+        assertEquals("guest", parsed.single().sourceZone)
     }
 }

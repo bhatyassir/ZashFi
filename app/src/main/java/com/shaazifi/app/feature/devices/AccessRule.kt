@@ -32,7 +32,7 @@ data class AccessRule(
             if (family == null && !name.startsWith("Parental:") && !name.startsWith("Block:")) return null
             val src = section.opt("src") ?: return null
             if (src == "wan" || !src.matches(Regex("[A-Za-z0-9_]{1,32}")) ||
-                (family == null && src != "lan") || section.opt("dest") != "wan" ||
+                section.opt("dest") != "wan" ||
                 section.opt("target") != "REJECT") return null
             val mac = section.list("src_mac").singleOrNull()?.takeIf(macPattern::matches) ?: return null
             val weekdays = section.list("weekdays").joinToString(" ")
@@ -44,11 +44,33 @@ data class AccessRule(
     }
 }
 
+internal fun withSourceZone(plan: PlanResult, zone: String?): PlanResult {
+    val validZone = zone?.takeIf { it != "wan" && it.matches(Regex("[A-Za-z0-9_]{1,32}")) } ?: return plan
+    if (plan !is PlanResult.Ready || validZone == "lan") return plan
+    val ops = plan.plan.ops.map { op ->
+        if (op is UciOp.Add && op.config == "firewall" && op.type == "rule" && "src" in op.values) {
+            op.copy(values = op.values + ("src" to validZone))
+        } else op
+    }
+    return PlanResult.Ready(plan.plan.copy(ops = ops))
+}
+
+internal fun validateScheduleTimes(plan: PlanResult): PlanResult {
+    if (plan !is PlanResult.Ready) return plan
+    val values = (plan.plan.ops.singleOrNull() as? UciOp.Add)?.values ?: return plan
+    return if (values["start_time"] == values["stop_time"]) {
+        PlanResult.Invalid("Choose different start and end times.")
+    } else plan
+}
+
 internal fun changeInternet(device: Device, rules: List<AccessRule>): PlanResult {
     val immediate = rules.filter { it.mac == device.mac && !it.scheduled && it.family == null }
     val active = immediate.filter { it.enabled }
     if (active.isEmpty() && immediate.isEmpty()) {
-        return FeatureChanges.parentalPause(device.mac, mapOf(device.mac to device.name))
+        return withSourceZone(
+            FeatureChanges.parentalPause(device.mac, mapOf(device.mac to device.name)),
+            device.network?.sourceZone
+        )
     }
     val pause = active.isEmpty()
     val targets = if (pause) immediate.take(1) else active

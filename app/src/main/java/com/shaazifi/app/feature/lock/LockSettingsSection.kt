@@ -12,7 +12,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
 import com.shaazifi.app.core.session.AppLock
 import com.shaazifi.app.core.session.BiometricGate
 import com.shaazifi.app.core.session.LockSettingsStore
@@ -45,6 +44,7 @@ fun LockSettingsSection(
     val canUnlock = remember { BiometricGate.canUnlock(context) }
     var enabled by remember { mutableStateOf(lock.enabled) }
     var timeout by remember { mutableStateOf(lock.timeout) }
+    var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var savedRouter by remember { mutableStateOf(false) }
     var savedAdGuard by remember { mutableStateOf(false) }
@@ -55,30 +55,47 @@ fun LockSettingsSection(
     }
 
     fun apply(newEnabled: Boolean, newTimeout: LockTimeout) {
+        if (busy || (newEnabled == lock.enabled && newTimeout == lock.timeout)) return
+        busy = true
         scope.launch {
-            if (newEnabled && !lock.enabled) {
-                // Prove the owner can unlock before turning the lock on.
-                val activity = context as? FragmentActivity ?: return@launch
-                lock.authenticationStarted()
-                val r = try {
-                    BiometricGate.unlock(activity, "Turn on the app lock", "Confirm with your fingerprint, face or PIN")
-                } finally {
-                    lock.authenticationEnded()
+            try {
+                if (needsLockVerification(lock.enabled, lock.timeout, newEnabled, newTimeout)) {
+                    // Prove the owner can unlock before enabling, disabling, or lengthening the lock timeout.
+                    val activity = BiometricGate.findActivity(context)
+                    if (activity == null) {
+                        message = "Fingerprint or PIN verification is unavailable here."
+                        return@launch
+                    }
+                    val title = when {
+                        newEnabled && !lock.enabled -> "Turn on the app lock"
+                        !newEnabled && lock.enabled -> "Turn off the app lock"
+                        else -> "Change lock timing"
+                    }
+                    lock.authenticationStarted()
+                    val r = try {
+                        BiometricGate.unlock(activity, title, "Confirm with your fingerprint, face or PIN")
+                    } finally {
+                        lock.authenticationEnded()
+                    }
+                    if (r != UnlockResult.Success) {
+                        message = if (r is UnlockResult.Failed) r.message else null
+                        return@launch
+                    }
                 }
-                if (r != UnlockResult.Success) {
-                    message = if (r is UnlockResult.Failed) r.message else null
-                    return@launch
+                if (newEnabled && !lock.enabled) {
+                    lock.configure(true, newTimeout)
+                    lock.unlocked()
+                } else {
+                    lock.configure(newEnabled, newTimeout)
                 }
-                lock.configure(true, newTimeout)
-                lock.unlocked()
-            } else {
-                lock.configure(newEnabled, newTimeout)
+                runCatching { settings.save(newEnabled, newTimeout) }
+                    .onSuccess { message = null }
+                    .onFailure { message = "Could not save the lock setting (${it::class.simpleName})." }
+                enabled = newEnabled
+                timeout = newTimeout
+            } finally {
+                busy = false
             }
-            runCatching { settings.save(newEnabled, newTimeout) }
-                .onFailure { message = "Could not save the lock setting (${it::class.simpleName})." }
-            enabled = newEnabled
-            timeout = newTimeout
-            message = null
         }
     }
 
@@ -133,3 +150,14 @@ fun LockSettingsSection(
         )
     }
 }
+
+/** True when changing lock settings weakens protection or turns the lock on and therefore requires re-authentication. */
+internal fun needsLockVerification(
+    currentEnabled: Boolean,
+    currentTimeout: LockTimeout,
+    newEnabled: Boolean,
+    newTimeout: LockTimeout
+): Boolean =
+    (newEnabled && !currentEnabled) ||
+        (!newEnabled && currentEnabled) ||
+        (newEnabled && currentEnabled && newTimeout.millis > currentTimeout.millis)

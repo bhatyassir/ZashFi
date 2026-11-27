@@ -21,9 +21,10 @@ class GuestCredential(
     /** "WPA", "WEP" or "nopass"; null when the network type cannot be shared by QR code. */
     val qrType: String?,
     val key: String?,
-    val hidden: Boolean
+    val hidden: Boolean,
+    val enabled: Boolean = true
 ) {
-    override fun toString() = "GuestCredential(ssid=$ssid, band=$band, type=$qrType, hidden=$hidden)"
+    override fun toString() = "GuestCredential(ssid=$ssid, band=$band, type=$qrType, hidden=$hidden, enabled=$enabled)"
 }
 
 /**
@@ -48,14 +49,21 @@ object GuestQr {
         }
     }
 
-    fun payload(c: GuestCredential): String = buildString {
-        val type = c.qrType ?: "nopass"
-        append("WIFI:T:").append(type).append(';')
-        val hexLike = c.ssid.isNotEmpty() && c.ssid.length % 2 == 0 && c.ssid.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
-        append("S:").append(if (hexLike) "\"${escape(c.ssid)}\"" else escape(c.ssid)).append(';')
-        if (type != "nopass" && !c.key.isNullOrEmpty()) append("P:").append(escape(c.key)).append(';')
-        if (c.hidden) append("H:true;")
-        append(';')
+    private fun isHexLike(s: String): Boolean =
+        s.isNotEmpty() && s.length % 2 == 0 && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
+
+    private fun formatValue(s: String): String =
+        if (isHexLike(s)) "\"${escape(s)}\"" else escape(s)
+
+    fun payload(c: GuestCredential): String {
+        val type = requireNotNull(c.qrType) { "Unsupported security type cannot be encoded in a Wi-Fi QR code." }
+        return buildString {
+            append("WIFI:T:").append(type).append(';')
+            append("S:").append(formatValue(c.ssid)).append(';')
+            if (type != "nopass" && !c.key.isNullOrEmpty()) append("P:").append(formatValue(c.key)).append(';')
+            if (c.hidden) append("H:true;")
+            append(';')
+        }
     }
 
     /** QR code modules (one pixel per module). Error correction M; [margin] modules of white border. */
@@ -70,7 +78,9 @@ object GuestQr {
      * their passwords; every other network's password is left behind.
      */
     fun guestCredentials(reply: JsonObject): List<GuestCredential> {
-        val guests = FeatureMappers.parseWireless(reply).second.filter { it.mode == "ap" && FeatureMappers.isGuest(it) }
+        val (radios, ifaces) = FeatureMappers.parseWireless(reply)
+        val radioDisabled = radios.associate { it.id to it.disabled }
+        val guests = ifaces.filter { it.mode == "ap" && FeatureMappers.isGuest(it) }
         return guests.map { g ->
             val cfg = findConfig(reply, g.radio, g.section, g.ssid)
             val raw = (cfg?.get("encryption") as? JsonPrimitive)?.content
@@ -79,7 +89,8 @@ object GuestQr {
                 band = g.band,
                 qrType = qrType(raw),
                 key = (cfg?.get("key") as? JsonPrimitive)?.content,
-                hidden = g.hidden
+                hidden = g.hidden,
+                enabled = !g.disabled && radioDisabled[g.radio] != true
             )
         }
     }

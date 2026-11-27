@@ -76,17 +76,43 @@ data class AdGuardQueryLogItem(
     val responseStatus: String? = null,
     val upstream: String? = null,
     val cached: Boolean? = null,
-    val answers: List<AdGuardDnsAnswer> = emptyList()
+    val answers: List<AdGuardDnsAnswer> = emptyList(),
+    @Transient
+    internal val occurrence: Int = 0
 ) {
     @Transient
     internal val timestamp = queryTimestamp(time)
 
     @Transient
-    internal val key = listOf(time, client, clientId.orEmpty(), questionName, questionType, elapsedMs).joinToString("\u0000")
+    internal val key = listOf(
+        time,
+        client,
+        clientId.orEmpty(),
+        questionName,
+        questionType,
+        elapsedMs,
+        reason,
+        responseStatus.orEmpty(),
+        occurrence.toString()
+    ).joinToString("\u0000")
 
     val isBlocked: Boolean
-        get() = reason.contains("block", ignoreCase = true) || reason.contains("blacklist", ignoreCase = true) ||
-            reason.contains("safebrowsing", ignoreCase = true) || reason.contains("parental", ignoreCase = true)
+        get() = reason.contains("block", ignoreCase = true) ||
+            reason.contains("blacklist", ignoreCase = true) ||
+            reason.contains("safebrowsing", ignoreCase = true) ||
+            reason.contains("parental", ignoreCase = true) ||
+            reason.equals("FilteredInvalid", ignoreCase = true)
+}
+
+internal fun List<AdGuardQueryLogItem>.withPageOccurrences(): List<AdGuardQueryLogItem> {
+    if (size <= 1) return this
+    val counts = HashMap<String, Int>(size)
+    return map { item ->
+        val base = if (item.occurrence == 0) item else item.copy(occurrence = 0)
+        val seen = counts[base.key] ?: 0
+        counts[base.key] = seen + 1
+        if (seen == item.occurrence) item else item.copy(occurrence = seen)
+    }
 }
 
 @Serializable

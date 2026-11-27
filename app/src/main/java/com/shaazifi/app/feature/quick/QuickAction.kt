@@ -14,12 +14,20 @@ import com.shaazifi.app.feature.web.ShellNavState
  */
 enum class QuickAction(val key: String) {
     ADGUARD_PAUSE("adguard_pause"),
-    GUEST_WIFI("guest_wifi");
+    GUEST_WIFI("guest_wifi"),
+    LED_NIGHT("led_night");
+
+    /** Distinct action string so PendingIntents never collide with widget or alert intents. */
+    fun intentAction(): String = "com.shaazifi.app.ACTION_QUICK_$key"
+
+    /** Unique PendingIntent requestCode per shortcut. */
+    val requestCode: Int get() = 100 + ordinal
 
     /** Where the signed-in app opens for this shortcut. */
     fun startNav(): ShellNavState = when (this) {
         ADGUARD_PAUSE -> ShellNavState().select(MainTab.AdGuard)
         GUEST_WIFI -> ShellNavState().openWifiFeature("guest")
+        LED_NIGHT -> ShellNavState().openMore(com.shaazifi.app.feature.web.MorePage.Feature("configtasks"))
     }
 
     companion object {

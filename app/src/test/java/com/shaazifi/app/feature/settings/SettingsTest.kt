@@ -282,4 +282,63 @@ class SettingsTest {
         val result = handler.saveAdGuardAddress("no-such-id", "192.168.1.1", "90", "http")
         assertTrue(result is AdGuardAddressSaveResult.Error)
     }
+
+    @Test
+    fun testForgetRouterExecutesOnSignOutBeforeClearingTrustStorePins() = runBlocking {
+        val profile = RouterProfile(
+            id = "r1",
+            name = "Router",
+            address = "https://192.168.1.1",
+            certificateFingerprint = "AA:BB",
+            vpnAddress = "https://100.64.0.7",
+            vpnCertificateFingerprint = "CC:DD"
+        )
+        val repo = InMemoryProfileRepository(listOf(profile))
+        val trustStore = TrustStore().apply {
+            pin(profile.address, profile.certificateFingerprint)
+            pin(profile.vpnAddress!!, profile.vpnCertificateFingerprint!!)
+        }
+        var homePinDuringSignOut: String? = null
+        var vpnPinDuringSignOut: String? = null
+        val handler = RouterSettingsHandler(
+            profileRepository = repo,
+            trustStore = trustStore,
+            clearWebStorage = {},
+            onSignOut = {
+                homePinDuringSignOut = trustStore.getPinned(profile.address)
+                vpnPinDuringSignOut = trustStore.getPinned(profile.vpnAddress!!)
+            }
+        )
+
+        handler.forgetRouter(profile.id, profile.address)
+
+        assertEquals("AA:BB", homePinDuringSignOut)
+        assertEquals("CC:DD", vpnPinDuringSignOut)
+        assertNull(trustStore.getPinned(profile.address))
+        assertNull(trustStore.getPinned(profile.vpnAddress!!))
+    }
+
+    @Test
+    fun testSaveAdGuardAddressWithAllowBlankValidatesAndClearsOptionalFields() = runBlocking {
+        val (repo, handler) = addressTestSetup()
+
+        val badHost = handler.saveAdGuardAddress("p1", "8.8.8.8", "", "http", allowBlank = true, username = "owner")
+        assertTrue("Public host must still be rejected when allowBlank=true", badHost is AdGuardAddressSaveResult.Error)
+
+        val badPort = handler.saveAdGuardAddress("p1", "", "abc", "http", allowBlank = true, username = "owner")
+        assertTrue("Non-numeric port must be rejected when allowBlank=true", badPort is AdGuardAddressSaveResult.Error)
+
+        val saved = handler.saveAdGuardAddress("p1", "192.168.1.50", "8080", "https", allowBlank = true, username = "custom")
+        assertTrue(saved is AdGuardAddressSaveResult.Saved)
+        assertEquals("192.168.1.50", repo.getProfileById("p1")!!.adguardHost)
+        assertEquals(8080, repo.getProfileById("p1")!!.adguardPort)
+        assertEquals("https", repo.getProfileById("p1")!!.adguardProtocol)
+        assertEquals("custom", repo.getProfileById("p1")!!.adguardUsername)
+
+        val cleared = handler.saveAdGuardAddress("p1", "", "", "http", allowBlank = true, username = "")
+        assertTrue(cleared is AdGuardAddressSaveResult.Saved)
+        assertNull(repo.getProfileById("p1")!!.adguardHost)
+        assertNull(repo.getProfileById("p1")!!.adguardPort)
+        assertEquals("admin", repo.getProfileById("p1")!!.adguardUsername)
+    }
 }

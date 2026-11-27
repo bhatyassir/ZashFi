@@ -24,6 +24,7 @@ internal data class QueryLogExport(val file: File, val count: Long)
 internal class QueryLogExportException(message: String) : Exception(message)
 
 private const val EXPORT_PREFIX = "zashfi-dns-"
+private const val MAX_RETAINED_EXPORT_FILES = 5
 
 internal suspend fun AdGuardQueryLogReader.export(
     directory: File,
@@ -36,12 +37,7 @@ internal suspend fun AdGuardQueryLogReader.export(
         return withContext(Dispatchers.IO) {
             if (!directory.isDirectory && !directory.mkdirs()) throw IOException("Export directory unavailable")
             val now = Instant.now()
-            val expiry = now.toEpochMilli() - TimeUnit.DAYS.toMillis(1)
-            directory.listFiles()?.forEach { previous ->
-                if (previous.name.startsWith(EXPORT_PREFIX) && previous.isFile && previous.lastModified() < expiry) {
-                    previous.delete()
-                }
-            }
+            cleanupOldExports(directory, now.toEpochMilli())
             val stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.ROOT)
                 .withZone(ZoneId.systemDefault()).format(now)
             val file = File.createTempFile("$EXPORT_PREFIX$stamp-", ".${format.extension}", directory)
@@ -49,8 +45,12 @@ internal suspend fun AdGuardQueryLogReader.export(
             val context = currentCoroutineContext()
             var count = 0L
             file.bufferedWriter(Charsets.UTF_8).use { writer ->
-                if (format == QueryLogExportFormat.CSV) writer.writeCsvRow(headers)
-                else writer.write("ZashFi DNS query log\n\n")
+                if (format == QueryLogExportFormat.CSV) {
+                    writer.write("\uFEFF")
+                    writer.writeCsvRow(headers)
+                } else {
+                    writer.write("ZashFi DNS query log\n\n")
+                }
                 forEachRetainedPage(filter) { queries ->
                     for (query in queries) {
                         context.ensureActive()
@@ -66,6 +66,26 @@ internal suspend fun AdGuardQueryLogReader.export(
     } catch (failure: Exception) {
         withContext(NonCancellable + Dispatchers.IO) { partial?.delete() }
         throw failure
+    }
+}
+
+internal fun cleanupOldExports(directory: File, nowMs: Long = System.currentTimeMillis()) {
+    val expiry = nowMs - TimeUnit.HOURS.toMillis(1)
+    val existing = directory.listFiles()
+        ?.filter { it.isFile && it.name.startsWith(EXPORT_PREFIX) }
+        .orEmpty()
+    val surviving = mutableListOf<File>()
+    for (file in existing) {
+        if (file.lastModified() < expiry) {
+            file.delete()
+        } else {
+            surviving.add(file)
+        }
+    }
+    if (surviving.size > MAX_RETAINED_EXPORT_FILES) {
+        surviving.sortedByDescending { it.lastModified() }
+            .drop(MAX_RETAINED_EXPORT_FILES)
+            .forEach { it.delete() }
     }
 }
 
@@ -99,13 +119,26 @@ private fun Writer.writeQuery(query: AdGuardQueryLogItem, format: QueryLogExport
     }
 }
 
+private fun Char.isCsvLeadingIgnorable(): Boolean =
+    this <= ' ' || isWhitespace() || this == '\uFEFF' || this == '\u00A0' || this == '\u200B'
+
+internal fun sanitizeCsvCell(value: String): String {
+    // Domains, labels and rule text are data. Prevent spreadsheet formula interpretation across lines and leading invisible chars.
+    val sanitized = value.split('\n').joinToString("\n") { rawLine ->
+        // C0 controls (other than tab/CR) can be smuggled ahead of a formula; drop them.
+        // NBSP, ZWSP and BOM are kept as data but still counted as leading ignorable chars.
+        val line = rawLine.dropWhile { it < ' ' && it != '\t' && it != '\r' }
+        val startsWithTabOrCr = line.firstOrNull()?.let { it == '\t' || it == '\r' } == true
+        val firstSignificant = line.trimStart { it.isCsvLeadingIgnorable() }.firstOrNull()
+        val needsQuotePrefix = startsWithTabOrCr || (firstSignificant != null && firstSignificant in "=+-@＝＋－＠")
+        if (needsQuotePrefix) "'$line" else line
+    }
+    return sanitized.replace("\"", "\"\"")
+}
+
 private fun Writer.writeCsvRow(fields: List<String>) {
     write(fields.joinToString(",") { value ->
-        // Domains, labels and rule text are data. Prevent spreadsheet formula interpretation.
-        val first = value.trimStart { it.isWhitespace() || it == '\uFEFF' }.firstOrNull()
-        val escaped = value.replace("\"", "\"\"")
-        val prefix = if (first != null && first in "=+-@＝＋－＠") "'" else ""
-        "\"$prefix$escaped\""
+        "\"${sanitizeCsvCell(value)}\""
     })
     write("\r\n")
 }

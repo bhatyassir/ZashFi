@@ -35,7 +35,8 @@ class AdGuardQueryLogReaderTest {
         assertEquals(65, states.last().items.size)
         assertEquals(65, states.last().items.distinctBy { it.key }.size)
         assertEquals(listOf(null, null), repository.requests.map { it.olderThan })
-        assertTrue(currentTime in 100..500)
+        assertEquals(AdGuardQueryLogReader.LIVE_POLL_MS, currentTime)
+        assertTrue(currentTime in 1_000L..1_500L)
     }
 
     @Test
@@ -90,6 +91,7 @@ class AdGuardQueryLogReaderTest {
         val states = AdGuardQueryLogReader(repository).live(LiveQueryLog()).toList()
 
         assertEquals(LiveLogStatus.UNAVAILABLE, states.single().status)
+        assertTrue(states.single().needsSignIn)
         assertEquals(1, repository.requests.size)
     }
 
@@ -135,6 +137,58 @@ class AdGuardQueryLogReaderTest {
         assertEquals("2001:db8::2", AdGuardLogDevice.fromIdentifier("2001:db8:0:0:0:0:0:2")?.identifier)
         assertNull(AdGuardLogDevice.fromIdentifier("AA:BB:CC:DD:EE:FF"))
         assertNull(AdGuardLogDevice.fromIdentifier("192.0.2.0/24"))
+    }
+
+    @Test
+    fun livePreservesIdenticalTimestampRowsInSinglePage() = runTest {
+        val dup1 = row(50)
+        val dup2 = row(50)
+        val repository = FakeLog { AdGuardQueryLog(timestamp(50), listOf(dup1, dup2)) }
+
+        val state = AdGuardQueryLogReader(repository).live(LiveQueryLog()).first()
+
+        assertEquals(2, state.items.size)
+        assertEquals(2, state.items.distinctBy { it.key }.size)
+    }
+
+    @Test
+    fun historyAutoAdvancesEmptyClientFilteredPagesWithBound() = runTest {
+        val selected = AdGuardLogDevice.fromIdentifier("tablet-1")!!
+        val repository = FakeLog { read ->
+            when (read) {
+                1 -> AdGuardQueryLog(timestamp(20), listOf(row(20).copy(clientId = "tablet-10")))
+                2 -> AdGuardQueryLog(timestamp(10), listOf(row(10).copy(clientId = "tablet-10")))
+                else -> AdGuardQueryLog(timestamp(5), listOf(row(5).copy(clientId = "tablet-1")))
+            }
+        }
+        val page = AdGuardQueryLogReader(repository).history(QueryLogFilter(selected, "", AgQueryFilter.ALL), null)
+
+        assertEquals(3, repository.requests.size)
+        assertEquals(listOf(row(5).copy(clientId = "tablet-1")), page.items)
+        assertEquals(timestamp(5), page.olderThan)
+    }
+
+    @Test
+    fun forEachRetainedPageDoesNotDuplicateNullTimestampsAndRetries429() = runTest {
+        val nullRow = AdGuardQueryLogItem("not-a-timestamp", "null-ts.example.test", "A", "192.0.2.1")
+        val p1 = AdGuardQueryLog(timestamp(10), listOf(row(11), nullRow))
+        val p2 = AdGuardQueryLog("", listOf(nullRow, row(9)))
+        var attempts = 0
+        val repository = FakeLog {
+            attempts++
+            if (attempts == 2) throw AdGuardError.RateLimited(retryAfterSeconds = 2)
+            if (attempts == 1) p1 else p2
+        }
+        val exported = mutableListOf<AdGuardQueryLogItem>()
+
+        AdGuardQueryLogReader(repository).forEachRetainedPage(QueryLogFilter(null, "", AgQueryFilter.ALL)) {
+            exported.addAll(it)
+        }
+
+        assertEquals(3, attempts)
+        assertEquals(2_000L, currentTime)
+        assertEquals(listOf("example.test", "null-ts.example.test", "example.test"), exported.map { it.questionName })
+        assertEquals(1, exported.count { it.questionName == "null-ts.example.test" })
     }
 
     private data class Request(val search: String?, val responseStatus: String?, val olderThan: String?)

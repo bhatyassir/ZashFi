@@ -44,8 +44,8 @@ fun VpnAddressRows(
 ) {
     val c = SfTheme.colors
     val scope = rememberCoroutineScope()
-    var open by remember { mutableStateOf(false) }
-    var input by remember(profile.vpnAddress) { mutableStateOf(profile.vpnAddress.orEmpty()) }
+    var open by remember(profile.id) { mutableStateOf(false) }
+    var input by remember(profile.id) { mutableStateOf(profile.vpnAddress.orEmpty()) }
     var checked by remember { mutableStateOf<Pair<String, String>?>(null) } // address to fingerprint
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -129,7 +129,10 @@ fun VpnAddressRows(
             }
             PrimaryButton("Approve and save", onClick = {
                 scope.launch {
-                    handler.saveVpnAddress(profile.id, address, fp)?.let(onProfileUpdated)
+                    handler.saveVpnAddress(profile.id, address, fp)?.let {
+                        input = address
+                        onProfileUpdated(it)
+                    }
                     checked = null
                     open = false
                 }

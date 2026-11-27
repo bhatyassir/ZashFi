@@ -27,9 +27,10 @@ object DeviceChanges {
 
     fun block(d: Device): DeviceChangeResult {
         if (d.blocked) return invalid("${d.name} is already blocked.")
+        val zone = d.network?.sourceZone?.takeIf { it.matches(Regex("[A-Za-z0-9_]{1,32}")) && it != "wan" } ?: "lan"
         val values = mapOf(
             "name" to "Block: ${hostname(d.name).ifBlank { d.mac }}",
-            "src" to "lan",
+            "src" to zone,
             "dest" to "wan",
             "src_mac" to d.mac,
             "proto" to "all",
@@ -99,12 +100,13 @@ object DeviceChanges {
     }
 
     fun removeFixedIp(d: Device): DeviceChangeResult {
-        val id = d.reserveId ?: return invalid("${d.name} has no fixed address.")
+        val id = d.reserveId?.takeIf { d.fixedIp != null } ?: return invalid("${d.name} has no fixed address.")
+        val keepName = !d.customName.isNullOrBlank()
         return ready(ChangePlan(
             title = "Stop giving ${d.name} a fixed address?",
             lines = listOf(ChangeLine("Fixed address", d.fixedIp ?: "Set", "None")),
-            ops = listOf(UciOp.Delete("dhcp", id)),
-            note = "A name given to this device in the app is removed with it."
+            ops = listOf(if (keepName) UciOp.DeleteOption("dhcp", id, "ip") else UciOp.Delete("dhcp", id)),
+            note = if (keepName) "Its custom name is kept." else null
         ))
     }
 

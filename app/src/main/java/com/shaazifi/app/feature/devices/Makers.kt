@@ -19,39 +19,79 @@ import kotlinx.coroutines.withContext
 class MakerTable(private val byPrefix: Map<String, String>) {
     val size get() = byPrefix.size
 
-    fun lookup(mac: String): String? {
-        val hex = mac.filter { it.isLetterOrDigit() }.uppercase()
-        if (hex.length != 12 || hex.any { it !in "0123456789ABCDEF" }) return null
-        if (Makers.isRandomized(mac)) return null
-        return byPrefix[hex.take(9)] ?: byPrefix[hex.take(7)] ?: byPrefix[hex.take(6)]
+    fun lookup(mac: String): String? = lookupInternal(mac, checkRandomized = true)
+
+    internal fun lookupInternal(mac: String, checkRandomized: Boolean): String? {
+        val hex = Makers.extractMacHex(mac) ?: return null
+        if (checkRandomized && (Makers.hexNibble(hex[1]) and 0x02) != 0) return null
+        val full = String(hex)
+        return byPrefix[full.substring(0, 9)] ?: byPrefix[full.substring(0, 7)] ?: byPrefix[full.substring(0, 6)]
     }
 }
 
 object Makers {
-    fun parse(text: String): MakerTable = MakerTable(
-        text.lineSequence().filter { it.isNotBlank() && !it.startsWith("#") }.mapNotNull { line ->
+    internal fun hexNibble(ch: Char): Int = when (ch) {
+        in '0'..'9' -> ch - '0'
+        in 'A'..'F' -> ch - 'A' + 10
+        in 'a'..'f' -> ch - 'a' + 10
+        else -> -1
+    }
+
+    internal fun extractMacHex(mac: String): CharArray? {
+        val out = CharArray(12)
+        var len = 0
+        for (i in 0 until mac.length) {
+            val ch = mac[i]
+            if (!ch.isLetterOrDigit()) continue
+            val n = hexNibble(ch)
+            if (n < 0 || len >= 12) return null
+            out[len++] = if (ch in 'a'..'f') (ch - 32) else ch
+        }
+        return if (len == 12) out else null
+    }
+
+    fun parse(lines: Sequence<String>): MakerTable {
+        val map = HashMap<String, String>(48_000)
+        for (line in lines) {
+            if (line.isBlank() || line.startsWith("#")) continue
             val tab = line.indexOf('\t')
-            if (tab <= 0) null else line.substring(0, tab) to line.substring(tab + 1)
-        }.toMap()
-    )
+            if (tab > 0) map[line.substring(0, tab)] = line.substring(tab + 1)
+        }
+        return MakerTable(map)
+    }
+
+    fun parse(text: String): MakerTable = parse(text.lineSequence())
 
     /**
      * True for "locally administered" addresses (bit 0x02 of the first byte), which phones and
      * laptops use as private random addresses: they have no maker.
      */
     fun isRandomized(mac: String): Boolean {
-        val first = mac.filter { it.isLetterOrDigit() }.take(2).toIntOrNull(16) ?: return false
-        return first and 0x02 != 0
+        var sawFirst = false
+        for (i in 0 until mac.length) {
+            val ch = mac[i]
+            if (!ch.isLetterOrDigit()) continue
+            val n = hexNibble(ch)
+            if (n < 0) return false
+            if (!sawFirst) {
+                sawFirst = true
+            } else {
+                return (n and 0x02) != 0
+            }
+        }
+        return false
     }
 
     fun label(table: MakerTable?, mac: String): String? =
-        if (isRandomized(mac)) "Private address" else table?.lookup(mac)
+        if (isRandomized(mac)) "Private address" else table?.lookupInternal(mac, checkRandomized = false)
 
     @Volatile private var cached: MakerTable? = null
 
-    /** Loads the bundled list once (about 1.5 MB of text), off the main thread. */
+    /** Streams the bundled list line-by-line once, off the main thread. */
     suspend fun load(context: Context): MakerTable = cached ?: withContext(Dispatchers.IO) {
-        cached ?: parse(context.assets.open("oui/makers.tsv").bufferedReader().use { it.readText() }).also { cached = it }
+        cached ?: context.assets.open("oui/makers.tsv").bufferedReader().useLines { lines ->
+            parse(lines)
+        }.also { cached = it }
     }
 }
 

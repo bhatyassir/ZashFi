@@ -6,20 +6,28 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.password
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -32,27 +40,36 @@ import com.shaazifi.app.ui.components.GhostButton
 import com.shaazifi.app.ui.components.Note
 import com.shaazifi.app.ui.components.PrimaryButton
 import com.shaazifi.app.ui.components.SfCard
+import com.shaazifi.app.ui.components.SfDivider
 import com.shaazifi.app.ui.components.SfList
 import com.shaazifi.app.ui.components.SwitchRow
 import com.shaazifi.app.ui.theme.SfText
 import com.shaazifi.app.ui.theme.SfTheme
 import kotlinx.coroutines.launch
 
+private val TEMP_THRESHOLDS_C = listOf(70.0, 75.0, 80.0, 85.0, 90.0)
+
 /**
  * Settings > Alerts (M10c). Off by default. Turning it on: notification permission (Android 13+),
  * then the router password for background checks (from the saved password with fingerprint, or
  * typed), kept as a second encrypted copy that opens without fingerprint (owner's choice).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword: SavedPassword) {
     val c = SfTheme.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val allowBackground = remember(profile.address, profile.certificateFingerprint) {
+        AlertSecurity.canPollInBackground(profile)
+    }
     var enabledHere by remember { mutableStateOf(false) }
     var otherRouter by remember { mutableStateOf(false) }
     var askPassword by remember { mutableStateOf(false) }
     var typed by remember { mutableStateOf("") }
     var hasSaved by remember { mutableStateOf(false) }
+    var highTempEnabled by remember { mutableStateOf(false) }
+    var tempThresholdC by remember { mutableDoubleStateOf(AlertRules.DEFAULT_TEMP_THRESHOLD_C) }
     var message by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(profile.id) {
@@ -60,9 +77,15 @@ fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword
         enabledHere = id == profile.id
         otherRouter = id != null && id != profile.id
         hasSaved = runCatching { savedPassword.has() }.getOrDefault(false) && savedPassword.usable
+        highTempEnabled = runCatching { container.alertSettings.highTempEnabled() }.getOrDefault(false)
+        tempThresholdC = runCatching { container.alertSettings.tempThresholdC() }.getOrDefault(AlertRules.DEFAULT_TEMP_THRESHOLD_C)
     }
 
     suspend fun finishEnable(password: String) {
+        if (!allowBackground) {
+            message = "Alerts cannot be enabled for plain http:// routers without a pinned HTTPS certificate."
+            return
+        }
         try {
             container.backgroundSecrets.save(profile.id, SecretKind.ROUTER_BACKGROUND, password)
             container.alertSettings.enable(profile.id)
@@ -78,7 +101,7 @@ fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword
     }
 
     val notifyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) askPassword = true else message = "Alerts need permission to show notifications."
+        if (granted && allowBackground) askPassword = true else if (!granted) message = "Alerts need permission to show notifications."
     }
 
     fun disable() {
@@ -92,19 +115,31 @@ fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!allowBackground) {
+            Note(
+                "Background alerts are disabled for plain http:// routers without a pinned HTTPS certificate, " +
+                    "because background checks could send your password unencrypted on any Wi-Fi network. " +
+                    "Switch this router to HTTPS with a pinned certificate to use alerts."
+            )
+        }
         SfList {
             SwitchRow(
                 title = "Alerts",
                 subtitle = when {
-                    enabledHere -> "On: new devices and internet outages"
+                    !allowBackground && enabledHere -> "Blocked over plain HTTP — turn off or switch to HTTPS"
+                    !allowBackground -> "Unavailable over plain http:// without a pinned certificate"
+                    enabledHere -> "On: new devices, internet outages" + if (highTempEnabled) ", high temp" else ""
                     otherRouter -> "On for another router; turning on here moves them"
                     else -> "Off"
                 },
                 checked = enabledHere,
+                enabled = enabledHere || allowBackground,
                 onToggle = { on ->
                     message = null
                     if (!on) {
                         disable()
+                    } else if (!allowBackground) {
+                        message = "Switch this router to HTTPS with a pinned certificate first."
                     } else if (!AlertNotifier.canNotify(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         notifyLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     } else {
@@ -112,8 +147,40 @@ fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword
                     }
                 }
             )
+            if (enabledHere && allowBackground) {
+                SfDivider()
+                SwitchRow(
+                    title = "High temperature alert",
+                    subtitle = "Warn when a router sensor reaches ${tempThresholdC.toInt()}°C",
+                    checked = highTempEnabled,
+                    onToggle = { on ->
+                        highTempEnabled = on
+                        scope.launch { runCatching { container.alertSettings.setHighTempEnabled(on) } }
+                    }
+                )
+            }
         }
-        if (askPassword && !enabledHere) {
+        if (enabledHere && allowBackground && highTempEnabled) {
+            SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 6.dp) {
+                Text("Temperature threshold", style = MaterialTheme.typography.titleSmall, color = c.ink)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TEMP_THRESHOLDS_C.forEach { limit ->
+                        FilterChip(
+                            selected = tempThresholdC.toInt() == limit.toInt(),
+                            onClick = {
+                                tempThresholdC = limit
+                                scope.launch { runCatching { container.alertSettings.setTempThresholdC(limit) } }
+                            },
+                            label = { Text("${limit.toInt()}°C") }
+                        )
+                    }
+                }
+            }
+        }
+        if (askPassword && !enabledHere && allowBackground) {
             SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 10.dp) {
                 Text("Router password for alerts", style = MaterialTheme.typography.titleMedium, color = c.ink)
                 Text(
@@ -141,7 +208,12 @@ fun AlertsSection(container: AppContainer, profile: RouterProfile, savedPassword
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            password()
+                            this[SemanticsProperties.EditableText] = AnnotatedString("•".repeat(typed.length))
+                        }
                 )
                 GhostButton("Turn alerts on", enabled = typed.isNotEmpty(), onClick = {
                     val pw = typed

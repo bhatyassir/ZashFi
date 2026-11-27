@@ -47,10 +47,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.shaazifi.app.AppContainer
 import com.shaazifi.app.data.RouterProfile
+import com.shaazifi.app.data.normalizeRouterAddress
 import com.shaazifi.app.debug.DebugRouterConfig
+import com.shaazifi.app.feature.alerts.AlertScheduler
 import kotlinx.coroutines.launch
 
 @Composable
@@ -64,6 +67,7 @@ fun RoutersScreen(
     onTryDemo: (() -> Unit)? = null
 ) {
     val c = SfTheme.colors
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val profiles by container.profileRepository.getProfiles().collectAsState(initial = emptyList())
 
@@ -177,6 +181,7 @@ fun RoutersScreen(
                 val addr = gwCandidates.firstOrNull() ?: "https://192.168.1.1"
                 addRouterHolder.openDialog(initialAddress = addr, initialName = "Home Gateway")
                 showAddDialog = true
+                coroutineScope.launch { addRouterHolder.probeCandidates(gwCandidates) }
             }
         )
     }
@@ -197,8 +202,15 @@ fun RoutersScreen(
                 TextButton(onClick = {
                     profilePendingForget = null
                     coroutineScope.launch {
-                        container.profileRepository.deleteProfile(target.id)
-                        container.trustStore.clearPin(target.address)
+                        if (runCatching { container.alertSettings.profileId() }.getOrNull() == target.id) {
+                            runCatching { container.alertSettings.disable() }
+                            runCatching { AlertScheduler.stop(context) }
+                        }
+                        val kept = runCatching { container.savedSessions.last() }.getOrNull()
+                        if (kept?.profileId == target.id) {
+                            runCatching { container.savedSessions.clear(kept) }
+                        }
+                        container.routerSettingsHandler.forgetRouter(target.id, target.address)
                     }
                 }) { Text("Forget", color = c.bad) }
             },
@@ -324,9 +336,10 @@ fun RoutersScreen(
                 TextButton(
                     onClick = {
                         val finalFp = addRouterUiState.discoveredFingerprint!!
+                        val normalizedAddress = normalizeRouterAddress(addRouterUiState.address) ?: addRouterUiState.address.trim()
                         val profile = RouterProfile(
-                            name = if (addRouterUiState.name.isBlank()) "My Router" else addRouterUiState.name,
-                            address = addRouterUiState.address,
+                            name = addRouterUiState.name.trim().ifBlank { "My Router" },
+                            address = normalizedAddress,
                             certificateFingerprint = finalFp
                         )
                         coroutineScope.launch {

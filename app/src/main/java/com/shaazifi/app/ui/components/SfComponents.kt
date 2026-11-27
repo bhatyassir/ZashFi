@@ -19,12 +19,14 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,10 +36,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -70,7 +77,10 @@ fun SfCard(
             .clip(CardShape)
             .background(c.surface)
             .border(1.dp, c.line, CardShape)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(
+                if (onClick != null) Modifier.heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onClick)
+                else Modifier
+            )
             .padding(contentPadding),
         verticalArrangement = Arrangement.spacedBy(verticalSpacing),
         content = content
@@ -121,7 +131,7 @@ fun SfListRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -164,14 +174,33 @@ fun IconTile(icon: ImageVector, live: Boolean = false, modifier: Modifier = Modi
 @Composable
 fun Pill(text: String, tone: PillTone = PillTone.Ok, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val (bg, fg) = pillColors(tone, SfTheme.colors)
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(7.dp))
-            .background(bg)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 9.dp, vertical = 3.dp)
-    ) {
-        Text(text, color = fg, style = SfText.eyebrow.copy(letterSpacing = SfText.sub.letterSpacing), maxLines = 1)
+    if (onClick != null) {
+        Box(
+            modifier = modifier
+                .heightIn(min = 48.dp)
+                .widthIn(min = 48.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .clickable(role = Role.Button, onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(bg)
+                    .padding(horizontal = 9.dp, vertical = 3.dp)
+            ) {
+                Text(text, color = fg, style = SfText.eyebrow.copy(letterSpacing = SfText.sub.letterSpacing), maxLines = 1)
+            }
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(7.dp))
+                .background(bg)
+                .padding(horizontal = 9.dp, vertical = 3.dp)
+        ) {
+            Text(text, color = fg, style = SfText.eyebrow.copy(letterSpacing = SfText.sub.letterSpacing), maxLines = 1)
+        }
     }
 }
 
@@ -183,13 +212,20 @@ fun Eyebrow(text: String, modifier: Modifier = Modifier) {
 
 /** `.big` with an optional `.sub` unit: "42.6 Mbps". */
 @Composable
-fun BigNumber(value: String, unit: String? = null, modifier: Modifier = Modifier) {
+fun BigNumber(
+    value: String,
+    unit: String? = null,
+    modifier: Modifier = Modifier,
+    color: Color = SfTheme.colors.ink,
+    valueStyle: TextStyle = SfText.big,
+    unitStyle: TextStyle = SfText.sub
+) {
     val c = SfTheme.colors
     Row(modifier = modifier, verticalAlignment = Alignment.Bottom) {
-        Text(value, style = SfText.big, color = c.ink)
-        if (unit != null) {
+        Text(value, style = valueStyle, color = color)
+        if (!unit.isNullOrBlank()) {
             Spacer(Modifier.width(4.dp))
-            Text(unit, style = SfText.sub, color = c.muted, modifier = Modifier.padding(bottom = 3.dp))
+            Text(unit, style = unitStyle, color = c.muted, modifier = Modifier.padding(bottom = 3.dp))
         }
     }
 }
@@ -230,10 +266,12 @@ fun SwitchCard(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
             .clip(CardShape)
             .background(c.surface)
             .border(1.dp, c.line, CardShape)
             .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onToggle)
+            .semantics { stateDescription = if (checked) "On" else "Off" }
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -262,6 +300,7 @@ fun SwitchRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onToggle)
+            .semantics { stateDescription = if (checked) "On" else "Off" }
             .padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -338,6 +377,7 @@ fun StatusDot(on: Boolean = true, modifier: Modifier = Modifier) {
             .size(9.dp)
             .clip(CircleShape)
             .background(if (on) c.accent else c.muted)
+            .semantics { contentDescription = if (on) "Online" else "Offline" }
     )
 }
 
@@ -383,12 +423,30 @@ fun PageHero(icon: ImageVector, hue: com.shaazifi.app.ui.theme.SfHue, title: Str
     }
 }
 
+/** Section heading: either a plain title or, when [hue] is given, an eyebrow with a coloured bar. */
+@Composable
+fun SectionTitle(
+    title: String,
+    modifier: Modifier = Modifier,
+    hue: com.shaazifi.app.ui.theme.SfHue? = null
+) {
+    if (hue != null) {
+        val (fg, _) = hue.colors()
+        Row(
+            modifier.padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(Modifier.size(width = 4.dp, height = 16.dp).clip(CircleShape).background(fg))
+            Eyebrow(title)
+        }
+    } else {
+        Text(title, modifier = modifier, style = MaterialTheme.typography.titleLarge, color = SfTheme.colors.ink)
+    }
+}
+
 /** A section title with a small coloured bar. */
 @Composable
 fun SectionBar(text: String, hue: com.shaazifi.app.ui.theme.SfHue, modifier: Modifier = Modifier) {
-    val (fg, _) = hue.colors()
-    Row(modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.size(width = 4.dp, height = 16.dp).clip(CircleShape).background(fg))
-        Eyebrow(text)
-    }
+    SectionTitle(title = text, modifier = modifier, hue = hue)
 }

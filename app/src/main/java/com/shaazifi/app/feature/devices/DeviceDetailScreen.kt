@@ -13,9 +13,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Button
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +31,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.dp
 import com.shaazifi.app.feature.home.HomeParsers
 import com.shaazifi.app.feature.router.ChangeController
+import kotlinx.coroutines.launch
 import com.shaazifi.app.feature.router.FeatureView
 import com.shaazifi.app.feature.router.LoadHolder
 import com.shaazifi.app.feature.router.LoadState
@@ -39,6 +44,7 @@ import com.shaazifi.app.ui.components.PageHeading
 import com.shaazifi.app.ui.components.SectionTitle
 import com.shaazifi.app.ui.components.HistoryRange
 import com.shaazifi.app.ui.components.TrafficReading
+import com.shaazifi.app.ui.components.PrimaryButton
 import com.shaazifi.app.ui.components.SfCard
 import com.shaazifi.app.ui.components.SfDivider
 import com.shaazifi.app.ui.theme.SfText
@@ -51,27 +57,33 @@ internal fun DeviceDetailScreen(
     devices: DeviceList,
     traffic: LoadHolder<FeatureView>,
     usage: LoadHolder<FeatureView>,
-    changes: ChangeController,
+    changes: ChangeController?,
     demo: Boolean,
     routerIp: String,
     onParental: () -> Unit,
     routerPageAction: @Composable () -> Unit,
     networkName: String?,
-    onNetwork: (() -> Unit)?
+    onNetwork: (() -> Unit)?,
+    quotaStore: QuotaStore? = null
 ) {
+    val makers = rememberMakers()
+    val maker = Makers.label(makers, device.mac)
+    val randomized = Makers.isRandomized(device.mac)
+    val kind = DeviceKind.guess(device.name, maker)
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         val (status, tone) = devicePill(device)
-        PageHeading(device.name, listOf(DeviceKind.guess(device.name, null).label, device.ip)
-            .filter { it.isNotBlank() }.joinToString(" · "), status, tone) {
+        PageHeading(device.name, listOfNotNull(kind.label, maker?.takeUnless { randomized }, device.ip.takeIf { it.isNotBlank() })
+            .joinToString(" · "), status, tone) {
             InternetAction(device, devices.accessRules, changes)
         }
         DeviceTraffic(device, devices.devices, traffic, usage, demo)
+        if (quotaStore != null) QuotaCard(device, quotaStore)
         DeviceDetailsAndActions(
             device, routerPageAction,
-            onRequest = if (demo) null else { result ->
+            onRequest = if (demo || changes == null) null else { result ->
                 when (result) {
                     is DeviceChangeResult.Ready -> { changes.request(result.plan); null }
                     is DeviceChangeResult.Invalid -> result.message
@@ -83,8 +95,8 @@ internal fun DeviceDetailScreen(
 }
 
 @Composable
-internal fun InternetAction(device: Device, rules: List<AccessRule>?, changes: ChangeController) {
-    if (rules == null) {
+internal fun InternetAction(device: Device, rules: List<AccessRule>?, changes: ChangeController?) {
+    if (rules == null || changes == null) {
         Note("Internet controls are unavailable for this router login.")
     } else {
         val manual = rules.any { it.mac == device.mac && it.enabled && !it.scheduled && it.family == null }
@@ -98,6 +110,35 @@ internal fun InternetAction(device: Device, rules: List<AccessRule>?, changes: C
             Text(if (manual) "Resume internet" else "Pause internet")
         }
         error?.let { Text(it, color = SfTheme.colors.bad, style = SfText.sub) }
+    }
+}
+
+@Composable
+private fun QuotaCard(device: Device, store: QuotaStore) {
+    val c = SfTheme.colors
+    val scope = rememberCoroutineScope()
+    var quotas by remember { mutableStateOf<List<Quota>>(emptyList()) }
+    var limitText by remember(device.mac) { mutableStateOf("") }
+    LaunchedEffect(device.mac) { quotas = store.all() }
+    SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 8.dp) {
+        Text("Daily data limit", style = MaterialTheme.typography.titleMedium, color = c.ink)
+        val current = quotas.firstOrNull { it.mac.equals(device.mac, ignoreCase = true) }
+        if (current != null) {
+            val status = evaluate(current, 0L, System.currentTimeMillis())
+            Text("${current.limitMb} MB per day · resets at UTC midnight", style = SfText.sub, color = c.muted)
+            TextButton(onClick = { scope.launch { store.remove(device.mac); quotas = store.all() } }) { Text("Remove limit") }
+        } else {
+            OutlinedTextField(value = limitText, onValueChange = { limitText = it },
+                label = { Text("Limit in MB (1–1,000,000)") }, singleLine = true)
+            PrimaryButton("Set limit", enabled = limitText.toIntOrNull() != null, onClick = {
+                val mb = limitText.toIntOrNull()
+                if (mb != null) scope.launch {
+                    store.save(Quota(device.mac.uppercase(), device.name, mb, System.currentTimeMillis()))
+                    quotas = store.all()
+                    limitText = ""
+                }
+            })
+        }
     }
 }
 

@@ -32,6 +32,12 @@ class GuestQrTest {
         assertEquals("WIFI:T:WPA;S:Guest;P:secret12;H:true;;", GuestQr.payload(cred("Guest", "WPA", "secret12", hidden = true)))
         assertEquals("WIFI:T:nopass;S:Guest;;", GuestQr.payload(cred("Guest", "nopass", null)))
         assertEquals("hex-looking names are quoted", "WIFI:T:WPA;S:\"ABCD\";P:secret12;;", GuestQr.payload(cred("ABCD", "WPA", "secret12")))
+        assertEquals("hex-looking passwords are quoted", "WIFI:T:WPA;S:Guest;P:\"1234ABCD\";;", GuestQr.payload(cred("Guest", "WPA", "1234ABCD")))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun unsupportedSecurityNeverDowngradesToNopass() {
+        GuestQr.payload(cred("CorpGuest", null, "secret"))
     }
 
     @Test
@@ -78,5 +84,23 @@ class GuestQrTest {
         val matrix = GuestQr.matrix(text, margin = 0)
         assertEquals(text, Decoder().decode(matrix).text)
         assertTrue(matrix.width >= 21)
+    }
+
+    @Test
+    fun disabledGuestInterfaceOrRadioIsReportedInCredential() {
+        val disabledReply = Json.parseToJsonElement(
+            """
+            {"radio0":{"up":false,"disabled":true,"config":{"band":"2g"},"interfaces":[
+              {"section":"guest_radio0","config":{"mode":"ap","ssid":"Guest24","encryption":"psk2","key":"pass1234","network":["guest"]}}
+            ]},
+             "radio1":{"up":true,"config":{"band":"5g"},"interfaces":[
+              {"section":"guest_radio1","config":{"mode":"ap","ssid":"Guest5","encryption":"psk2","key":"pass5678","network":["guest"],"disabled":true}}
+            ]}}
+            """
+        ).jsonObject
+        val guests = GuestQr.guestCredentials(disabledReply)
+        assertEquals(2, guests.size)
+        assertFalse(guests[0].enabled)
+        assertFalse(guests[1].enabled)
     }
 }

@@ -189,6 +189,29 @@ object HomeParsers {
             if (name == "loopback") null else name to o["up"].isTrue()
         }
 
+    private fun bandFromConfig(band: String?): String = when (band) {
+        "2g" -> "2.4 GHz"
+        "5g" -> "5 GHz"
+        "6g" -> "6 GHz"
+        "60g" -> "60 GHz"
+        else -> ""
+    }
+
+    private fun bandFromFrequency(freqMhz: Double?): String = when {
+        freqMhz == null -> ""
+        freqMhz in 2400.0..2500.0 -> "2.4 GHz"
+        freqMhz in 5000.0..5900.0 -> "5 GHz"
+        freqMhz in 5925.0..7125.0 -> "6 GHz"
+        freqMhz >= 57000.0 -> "60 GHz"
+        else -> ""
+    }
+
+    private fun JsonElement?.freqMhz(): Double? = when {
+        this == null -> null
+        isJsonNumber() -> asNum()
+        else -> asStr()?.toDoubleOrNull()
+    }
+
     /**
      * Owner feedback: one card per Wi-Fi network (access point), from `network.wireless status` or
      * `luci-rpc getWirelessDevices` (same radio -> interfaces shape; the latter adds `iwinfo`).
@@ -199,7 +222,8 @@ object HomeParsers {
         for ((radioId, radio) in status) {
             val r = radio.asObj() ?: continue
             val rc = r["config"].asObj()
-            val band = when (rc?.get("band").asStr()) { "2g" -> "2.4 GHz"; "5g" -> "5 GHz"; "6g" -> "6 GHz"; "60g" -> "60 GHz"; else -> "" }
+            val configBand = bandFromConfig(rc?.get("band").asStr())
+            val radioFreqBand = bandFromFrequency(r["iwinfo"].asObj()?.get("frequency").freqMhz())
             val radioUp = r["up"].isTrue() && !r["disabled"].isTrue()
             for (element in r["interfaces"].asArr().orEmpty()) {
                 val iface = element.asObj() ?: continue
@@ -207,6 +231,7 @@ object HomeParsers {
                 if ((config?.get("mode").asStr() ?: "ap") != "ap") continue
                 val iw = iface["iwinfo"].asObj()
                 val ssid = config?.get("ssid").asStr().orNullIfEmpty() ?: iw?.get("ssid").asStr().orNullIfEmpty() ?: continue
+                val band = configBand.ifEmpty { bandFromFrequency(iw?.get("frequency").freqMhz()) }.ifEmpty { radioFreqBand }
                 val ch = iw?.get("channel")
                 val channel = if (ch.isJsonNumber()) ch.asNum().toLong().toString()
                     else ch.asStr().orNullIfEmpty() ?: rc?.get("channel").asStr().orEmpty()

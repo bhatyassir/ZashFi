@@ -8,6 +8,7 @@ import com.shaazifi.app.data.ProfileRepository
 import com.shaazifi.app.data.RouterProfile
 import com.shaazifi.app.data.normalizeAdGuardHost
 import com.shaazifi.app.data.normalizeRouterAddress
+import com.shaazifi.app.feature.routers.RouterDisplay
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,9 +28,14 @@ class RouterSettingsHandler(
     private val trustStore: TrustStore,
     private val clearWebStorage: () -> Unit,
     /** Deletes this router's saved passwords (M9). */
-    private val forgetSecrets: suspend (profileId: String) -> Unit = {}
+    private val forgetSecrets: suspend (profileId: String) -> Unit = {},
+    /** Signs out / destroys remote session before TrustStore pins are cleared. */
+    private val onSignOut: suspend () -> Unit = {}
 ) {
     suspend fun forgetRouter(profileId: String, routerAddress: String): Boolean {
+        // 0. Sign out / destroy active session before TrustStore pins are removed.
+        runCatching { onSignOut() }
+
         val vpnAddress = runCatching { profileRepository.getProfileById(profileId)?.vpnAddress }.getOrNull()
 
         // 1. Delete profile from repository
@@ -76,7 +82,9 @@ class RouterSettingsHandler(
         existing.vpnAddress?.let { trustStore.clearPin(it) }
         val updated = existing.copy(vpnAddress = address, vpnCertificateFingerprint = fingerprint)
         profileRepository.saveProfile(updated)
-        trustStore.pin(address, fingerprint)
+        if (fingerprint != RouterDisplay.HTTP_NO_PIN && fingerprint.isNotBlank()) {
+            trustStore.pin(address, fingerprint)
+        }
         return updated
     }
 
@@ -114,30 +122,40 @@ class RouterSettingsHandler(
 
     /**
      * Saves an AdGuard Home address typed by the user (host, port, protocol), after checking it.
-     * Keeps the profile's other AdGuard fields (enabled, username). Never fails silently:
-     * every failure comes back as [AdGuardAddressSaveResult.Error] with a message for the screen.
-     * Only private or Tailscale addresses are accepted (AddressGuard).
+     * Keeps the profile's other AdGuard fields (enabled, and username unless [username] is given).
+     * When [allowBlank] is true, empty host/port clear those fields to null (router address / 3000);
+     * non-blank values are always validated against [AddressGuard] and port range 1..65535.
      */
     suspend fun saveAdGuardAddress(
         profileId: String,
         host: String,
         portText: String,
         protocol: String,
-        dns: AddressGuardDns = SystemAddressGuardDns
+        dns: AddressGuardDns = SystemAddressGuardDns,
+        allowBlank: Boolean = false,
+        username: String? = null
     ): AdGuardAddressSaveResult = withContext(Dispatchers.IO) {
-        val cleanHost = normalizeAdGuardHost(host)
-            ?: return@withContext AdGuardAddressSaveResult.Error(
-                "Enter the AdGuard Home address, for example 192.168.1.1."
-            )
-        val port = portText.trim().toIntOrNull()
-        if (port == null || port !in 1..65535) {
-            return@withContext AdGuardAddressSaveResult.Error("Port must be a number from 1 to 65535.")
+        val trimmedHost = host.trim()
+        val cleanHost = if (allowBlank && trimmedHost.isEmpty()) {
+            null
+        } else {
+            normalizeAdGuardHost(trimmedHost)
+                ?: return@withContext AdGuardAddressSaveResult.Error(
+                    "Enter the AdGuard Home address, for example 192.168.1.1."
+                )
+        }
+        val trimmedPort = portText.trim()
+        val port = if (allowBlank && trimmedPort.isEmpty()) {
+            null
+        } else {
+            trimmedPort.toIntOrNull()?.takeIf { it in 1..65535 }
+                ?: return@withContext AdGuardAddressSaveResult.Error("Port must be a number from 1 to 65535.")
         }
         val proto = protocol.trim().lowercase()
         if (proto != "http" && proto != "https") {
             return@withContext AdGuardAddressSaveResult.Error("Protocol must be http or https.")
         }
-        if (!AddressGuard.isAllowed(cleanHost, dns)) {
+        if (cleanHost != null && !AddressGuard.isAllowed(cleanHost, dns)) {
             return@withContext AdGuardAddressSaveResult.Error(
                 "$cleanHost is not a private or Tailscale address. The app only talks to your own network."
             )
@@ -149,7 +167,13 @@ class RouterSettingsHandler(
         } ?: return@withContext AdGuardAddressSaveResult.Error(
             "Could not save: this router is not in the saved list."
         )
-        val updated = existing.copy(adguardHost = cleanHost, adguardPort = port, adguardProtocol = proto)
+        val cleanUsername = username?.trim()?.ifBlank { "admin" } ?: existing.adguardUsername
+        val updated = existing.copy(
+            adguardHost = cleanHost,
+            adguardPort = port,
+            adguardProtocol = proto,
+            adguardUsername = cleanUsername
+        )
         try {
             profileRepository.saveProfile(updated)
         } catch (e: Exception) {
