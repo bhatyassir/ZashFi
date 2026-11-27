@@ -5,6 +5,7 @@ import com.shaazifi.app.core.net.CertificateChangedException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.PortUnreachableException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
@@ -19,8 +20,8 @@ object RouteChooser {
         val chain = generateSequence(e) { it.cause.takeIf { c -> c !== it } }.take(10).toList()
         if (chain.any { it is CertificateChangedException || it is SSLException || it is AddressNotAllowedException || it is SecurityException }) return false
         return chain.any {
-            it is ConnectException || it is SocketTimeoutException || it is NoRouteToHostException ||
-                it is UnknownHostException || it is PortUnreachableException
+            it is SocketException || it is ConnectException || it is SocketTimeoutException ||
+                it is NoRouteToHostException || it is UnknownHostException || it is PortUnreachableException
         }
     }
 }

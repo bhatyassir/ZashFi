@@ -1,8 +1,11 @@
 package com.shaazifi.app.core.net
 
 import okhttp3.Dns
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
+import okhttp3.Request
 import okhttp3.Response
+import java.io.IOException
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -11,15 +14,11 @@ import java.net.InetAddress
  * AddressGuard enforces that all network connections from ShaaziFi are strictly
  * confined to private RFC 1918 networks, Tailscale (100.64.0.0/10), loopback,
  * and local IPv6 ranges.
- *
- * Public internet addresses (e.g. 8.8.8.8, google.com), obfuscated/DWORD/hex IP
- * representations, IPv4-mapped IPv6 public addresses (::ffff:8.8.8.8), and .lan
- * names resolving to public addresses are strictly refused.
  */
 class AddressNotAllowedException(
     val host: String,
     message: String = "Access to address '$host' is refused. Only private LAN, Tailscale (100.64.0.0/10), loopback, and local IPv6 addresses are permitted."
-) : SecurityException(message)
+) : IOException(message)
 
 fun interface AddressGuardDns {
     fun lookup(hostname: String): List<InetAddress>
@@ -40,10 +39,10 @@ object AddressGuard {
         val clean = host.trim().removeSurrounding("[", "]")
         // Single integer / DWORD (e.g. 2130706433)
         if (clean.isNotEmpty() && clean.all { it.isDigit() }) return true
-        // Hex notation anywhere
-        if (clean.contains("0x", ignoreCase = true)) return true
         // Dotted parts
         val parts = clean.split(".")
+        // Hex IP notation (e.g. 0x7f.1 or 0x7f000001) without rejecting valid hostnames like box0x1.lan
+        if (parts.any { it.startsWith("0x", ignoreCase = true) }) return true
         if (parts.size in 2..3 && parts.all { it.isNotEmpty() && it.all { c -> c.isDigit() } }) {
             // Shorthand 2-part or 3-part IP (e.g. 127.1 or 10.0.1)
             return true
@@ -114,8 +113,8 @@ object AddressGuard {
             authority
         }
 
-        // Handle IPv6 literal bracket: [::1]:80 -> ::1, or [fe80::1] -> fe80::1
-        return if (hostAndPort.startsWith("[")) {
+        // Handle IPv6 literal bracket: [::1]:80 -> ::1, or [fe80::1%wlan0] -> fe80::1
+        val rawHost = if (hostAndPort.startsWith("[")) {
             hostAndPort.substringAfter("[").substringBefore("]")
         } else if (hostAndPort.count { it == ':' } == 1) {
             // Standard hostname:port or ipv4:port
@@ -124,6 +123,7 @@ object AddressGuard {
             // Unbracketed IPv6 literal or hostname without port
             hostAndPort
         }
+        return rawHost.substringBefore("%")
     }
 
     fun isAddressAllowed(addr: InetAddress): Boolean {
@@ -188,29 +188,58 @@ object AddressGuard {
 
 /**
  * OkHttp Interceptor that guards every outbound HTTP request and any redirect locations.
+ *
+ * OkHttp's `RetryAndFollowUpInterceptor` resolves and connects to redirect targets between
+ * application and network interceptors, so an application interceptor that only inspects the
+ * final response never sees an unsafe redirect hop. This interceptor therefore owns the
+ * follow-up loop itself (automatic redirects are disabled in [HttpFactory]): every Location
+ * is validated with [AddressGuard.requireAllowed] *before* a second [Interceptor.Chain.proceed]
+ * is issued. That keeps the guard on the post-redirect path without adding a network
+ * interceptor (which would duplicate DNS lookups on every request).
  */
 class AddressGuardInterceptor(
     private val dns: AddressGuardDns = SystemAddressGuardDns
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val host = request.url.host
-        AddressGuard.requireAllowed(host, dns)
+        var request = chain.request()
+        AddressGuard.requireAllowed(request.url.host, dns)
 
-        val response = chain.proceed(request)
+        var redirectCount = 0
+        while (true) {
+            val response = chain.proceed(request)
+            if (!response.isRedirect) return response
 
-        // Re-check on every redirect (301, 302, 303, 307, 308)
-        if (response.isRedirect) {
-            val location = response.header("Location")
-            if (location != null) {
-                val redirectUrl = request.url.resolve(location)
-                if (redirectUrl != null) {
-                    AddressGuard.requireAllowed(redirectUrl.host, dns)
-                }
+            val redirectUrl = response.header("Location")?.let { request.url.resolve(it) }
+                ?: return response // no usable target: expose the redirect to the caller
+            AddressGuard.requireAllowed(redirectUrl.host, dns)
+
+            if (++redirectCount > MAX_REDIRECTS) {
+                response.close()
+                throw IOException("Too many redirects (max $MAX_REDIRECTS)")
             }
+            val followUp = request.followRedirectTo(redirectUrl, response.code)
+            response.close()
+            request = followUp
         }
+    }
 
-        return response
+    /** Mirrors OkHttp's follow-up rules without forwarding credentials to a different host. */
+    private fun Request.followRedirectTo(url: HttpUrl, statusCode: Int): Request {
+        val builder = newBuilder().url(url)
+        if (!url.host.equals(this.url.host, ignoreCase = true)) builder.removeHeader("Authorization")
+        // 303 (and POST/PUT/PATCH 301/302) become GET; 307/308 keep the original method.
+        val becomesGet = when {
+            statusCode == 303 && !method.equals("HEAD", ignoreCase = true) -> true
+            (statusCode == 301 || statusCode == 302) && !method.equals("GET", ignoreCase = true) &&
+                !method.equals("HEAD", ignoreCase = true) -> true
+            else -> false
+        }
+        if (becomesGet) builder.method("GET", null)
+        return builder.build()
+    }
+
+    companion object {
+        private const val MAX_REDIRECTS = 20
     }
 }
 
@@ -221,14 +250,15 @@ class OkHttpAddressGuardDns(
     private val dns: AddressGuardDns = SystemAddressGuardDns
 ) : Dns {
     override fun lookup(hostname: String): List<InetAddress> {
-        val cleanHost = hostname.trim().removeSurrounding("[", "]")
+        val cleanHost = hostname.trim().removeSurrounding("[", "]").substringBefore("%")
         if (AddressGuard.isNonCanonicalIp(cleanHost)) {
             throw AddressNotAllowedException(hostname)
         }
         val addresses = dns.lookup(cleanHost)
-        if (addresses.isEmpty() || !addresses.all { AddressGuard.isAddressAllowed(it) }) {
+        val allowed = addresses.filter { AddressGuard.isAddressAllowed(it) }
+        if (allowed.isEmpty()) {
             throw AddressNotAllowedException(hostname)
         }
-        return addresses
+        return allowed
     }
 }

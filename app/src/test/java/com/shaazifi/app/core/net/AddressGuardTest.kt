@@ -264,4 +264,65 @@ class AddressGuardTest {
             AddressGuard.requireAllowed(url) // Must not throw
         }
     }
+
+    @Test
+    fun testAddressNotAllowedExceptionIsIOExceptionAndSafeWithAsyncOkHttp() {
+        val ex = AddressNotAllowedException("8.8.8.8")
+        assertTrue(ex is java.io.IOException)
+        assertFalse((ex as Any) is SecurityException)
+
+        val client = HttpFactory.createClient()
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var capturedError: java.io.IOException? = null
+        client.newCall(Request.Builder().url("https://8.8.8.8/").build()).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                capturedError = e
+                latch.countDown()
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.close()
+                latch.countDown()
+            }
+        })
+        assertTrue("Async call should fail cleanly via Callback.onFailure", latch.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue(capturedError is AddressNotAllowedException)
+    }
+
+    @Test
+    fun testIsNonCanonicalIpAllowsDomainsContaining0xAndStripsIpv6ZoneId() {
+        assertFalse(AddressGuard.isNonCanonicalIp("box0x1.lan"))
+        assertFalse(AddressGuard.isNonCanonicalIp("my0xrouter.local"))
+        assertTrue(AddressGuard.isNonCanonicalIp("0x7f000001"))
+        assertTrue(AddressGuard.isNonCanonicalIp("0x7f.1"))
+
+        val lanDns = AddressGuardDns { host ->
+            if (host == "box0x1.lan") listOf(InetAddress.getByName("192.168.1.1"))
+            else emptyList()
+        }
+        assertTrue(AddressGuard.isAllowed("http://box0x1.lan/ubus", lanDns))
+
+        assertEquals("fe80::1", AddressGuard.extractHost("http://[fe80::1%wlan0]:8080/ubus"))
+        assertEquals("fe80::1", AddressGuard.extractHost("fe80::1%eth0"))
+        assertTrue(AddressGuard.isAllowed("http://[fe80::1%wlan0]:8080/"))
+    }
+
+    @Test
+    fun testOkHttpAddressGuardDnsFiltersDualStackToAllowedRecords() {
+        val publicAddr = InetAddress.getByName("8.8.8.8")
+        val lanAddr = InetAddress.getByName("192.168.1.1")
+        val dualDns = AddressGuardDns { listOf(publicAddr, lanAddr) }
+
+        val guardDns = OkHttpAddressGuardDns(dualDns)
+        val filtered = guardDns.lookup("dual.lan")
+        assertEquals(listOf(lanAddr), filtered)
+
+        val allPublicDns = OkHttpAddressGuardDns(AddressGuardDns { listOf(publicAddr) })
+        try {
+            allPublicDns.lookup("public.lan")
+            fail("Expected AddressNotAllowedException when zero allowed addresses remain")
+        } catch (e: AddressNotAllowedException) {
+            assertEquals("public.lan", e.host)
+        }
+    }
 }

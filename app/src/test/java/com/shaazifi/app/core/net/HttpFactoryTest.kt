@@ -84,5 +84,42 @@ class HttpFactoryTest {
             assertEquals("router.lan", e.host)
         }
     }
+
+    @Test
+    fun testHttpFactorySetsWriteAndCallTimeoutsAndAvoidsTripleDnsLookup() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("OK"))
+        server.start()
+
+        try {
+            var lookupCount = 0
+            val countingDns = AddressGuardDns { hostname ->
+                lookupCount++
+                listOf(InetAddress.getByName("127.0.0.1"))
+            }
+
+            val client = HttpFactory.createClient(dns = countingDns)
+            assertEquals(30_000, client.writeTimeoutMillis)
+            assertEquals(45_000, client.callTimeoutMillis)
+            assertEquals(1, client.interceptors.size)
+            assertEquals(0, client.networkInterceptors.size)
+
+            val url = server.url("/").newBuilder().host("router.lan").build()
+            client.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                assertEquals(200, resp.code)
+            }
+            // No network interceptor duplicate DNS lookup (app interceptor + Dns = at most 2)
+            assertTrue("Expected <= 2 DNS lookups (no network interceptor triple lookup), got $lookupCount", lookupCount <= 2)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testHttpFactoryWiresCustomSocketFactory() {
+        val customFactory = javax.net.SocketFactory.getDefault()
+        val client = HttpFactory.createClient(socketFactory = customFactory)
+        assertEquals(customFactory, client.socketFactory)
+    }
 }
 

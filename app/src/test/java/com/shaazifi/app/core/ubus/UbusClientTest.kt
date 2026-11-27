@@ -1,5 +1,10 @@
 package com.shaazifi.app.core.ubus
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -7,13 +12,18 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class UbusClientTest {
 
@@ -184,6 +194,10 @@ class UbusClientTest {
         assertEquals("https://100.64.0.7/ubus", client.normalizeUbusUrl("https://100.64.0.7/untangled/"))
         assertEquals("https://100.64.0.7/ubus", client.normalizeUbusUrl("https://100.64.0.7/ubus"))
         assertEquals("https://100.64.0.7/ubus", client.normalizeUbusUrl("https://100.64.0.7/ubus/"))
+        assertEquals("https://100.64.0.7/proxy/ubus", client.normalizeUbusUrl("https://100.64.0.7/proxy"))
+        assertEquals("https://100.64.0.7/proxy/ubus", client.normalizeUbusUrl("https://100.64.0.7/proxy/"))
+        assertEquals("https://100.64.0.7/proxy/ubus", client.normalizeUbusUrl("https://100.64.0.7/proxy/ubus/"))
+        assertEquals("https://100.64.0.7/proxy/ubus", client.normalizeUbusUrl("https://100.64.0.7/proxy/untangled/"))
     }
 
     @Test
@@ -458,11 +472,135 @@ class UbusClientTest {
                 fail("Expected UbusError.AccessDenied when retry also lacks permission")
             } catch (e: UbusError.AccessDenied) {
                 assertEquals(-32002, e.code)
+                assertTrue("Expected AccessDenied after refresh to be marked isAclDenied", e.isAclDenied)
+                assertEquals("restricted.object", e.ubusObject)
+                assertEquals("restricted_method", e.method)
             }
 
             // Must have attempted re-login at most ONCE, never looped!
             assertEquals(1, reloginCount)
             assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testConcurrentExpiredCallsCoalesceSingleFlightRefresh() = runBlocking {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val body = request.body.readUtf8()
+                return if (body.contains("stale_token")) {
+                    MockResponse().setResponseCode(200).setBody("""{"jsonrpc":"2.0","id":1,"result":[4]}""")
+                } else {
+                    MockResponse().setResponseCode(200).setBody("""{"jsonrpc":"2.0","id":2,"result":[0,{"ok":true}]}""")
+                }
+            }
+        }
+        server.start()
+
+        try {
+            val client = UbusClient(OkHttpClient())
+            val reloginCount = AtomicInteger(0)
+            val url = server.url("/ubus").toString()
+
+            val results = (1..4).map {
+                async {
+                    client.call(
+                        endpointUrl = url,
+                        token = "stale_token",
+                        ubusObject = "system",
+                        method = "info",
+                        onSessionExpired = {
+                            delay(40)
+                            reloginCount.incrementAndGet()
+                            "fresh_token"
+                        }
+                    )
+                }
+            }.awaitAll()
+
+            assertEquals(1, reloginCount.get())
+            assertEquals(4, results.size)
+            results.forEach { res ->
+                assertEquals("true", res["ok"]?.jsonPrimitive?.content)
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testParseUbusResponseHandlesJsonNullErrorAndNonIntStatus() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"jsonrpc":"2.0","id":1,"error":null,"result":[0,{"status":"fine"}]}"""
+            )
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"jsonrpc":"2.0","id":2,"result":["not_an_int"]}"""
+            )
+        )
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"jsonrpc":"2.0","id":3,"result":[null]}"""
+            )
+        )
+        server.start()
+
+        try {
+            val client = UbusClient(OkHttpClient())
+            val url = server.url("/ubus").toString()
+
+            val ok = client.call(url, "tok", "system", "info")
+            assertEquals("fine", ok["status"]?.jsonPrimitive?.content)
+
+            try {
+                client.call(url, "tok", "system", "info")
+                fail("Expected UbusError.InvalidJson for string status element")
+            } catch (_: UbusError.InvalidJson) {}
+
+            try {
+                client.call(url, "tok", "system", "info")
+                fail("Expected UbusError.InvalidJson for null status element")
+            } catch (_: UbusError.InvalidJson) {}
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testCallSupportsCoroutineCancellation() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBodyDelay(5, TimeUnit.SECONDS)
+                .setBody("""{"jsonrpc":"2.0","id":1,"result":[0,{}]}""")
+        )
+        server.start()
+
+        try {
+            val client = UbusClient(OkHttpClient())
+            var caughtCancel = false
+            val job = launch {
+                try {
+                    client.call(server.url("/ubus").toString(), "tok", "system", "info")
+                } catch (e: CancellationException) {
+                    caughtCancel = true
+                    throw e
+                }
+            }
+            delay(50)
+            val start = System.currentTimeMillis()
+            job.cancel()
+            job.join()
+            val elapsed = System.currentTimeMillis() - start
+            assertTrue("Expected prompt cancellation, took ${elapsed}ms", elapsed < 2000)
+            assertTrue(caughtCancel)
         } finally {
             server.shutdown()
         }

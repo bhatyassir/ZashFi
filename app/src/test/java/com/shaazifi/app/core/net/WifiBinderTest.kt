@@ -47,11 +47,25 @@ class WifiBinderTest {
         assertFalse(WifiBinder.shouldBindToWifi("192.169.0.1"))
         assertFalse(WifiBinder.shouldBindToWifi("192.169.1.1"))
 
-        // IPv4-mapped IPv6 public address
+        // IPv4-mapped IPv6 public and Tailscale addresses
         assertFalse(WifiBinder.shouldBindToWifi("::ffff:8.8.8.8"))
+        assertFalse(WifiBinder.shouldBindToWifi("::ffff:100.64.0.1"))
+
+        // IPv6 loopback and public addresses
+        assertFalse(WifiBinder.shouldBindToWifi("::1"))
+        assertFalse(WifiBinder.shouldBindToWifi("2001:4860:4860::8888"))
 
         // Alternative representations
         assertFalse(WifiBinder.shouldBindToWifi("2130706433"))
         assertFalse(WifiBinder.shouldBindToWifi("0x7f.1"))
+    }
+
+    @Test
+    fun testBindsLocalIpv6UlaAndLinkLocalAddresses() {
+        assertTrue(WifiBinder.shouldBindToWifi("fd00::1"))
+        assertTrue(WifiBinder.shouldBindToWifi("fd12:3456:789a::1"))
+        assertTrue(WifiBinder.shouldBindToWifi("fe80::1"))
+        assertTrue(WifiBinder.shouldBindToWifi("[fe80::1%wlan0]:8080"))
+        assertTrue(WifiBinder.shouldBindToWifi("::ffff:192.168.1.1"))
     }
 }

@@ -4,6 +4,8 @@ import com.shaazifi.app.core.net.HttpFactory
 import com.shaazifi.app.core.net.TrustStore
 import com.shaazifi.app.core.ubus.UbusClient
 import com.shaazifi.app.data.RouterProfile
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -18,6 +20,7 @@ import java.io.File
 import java.net.ConnectException
 import java.security.KeyStore
 import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
@@ -285,6 +288,99 @@ class SessionManagerTest {
         assertNotNull(diag.exceptionClass)
         val cls = diag.exceptionClass ?: ""
         assertTrue(cls.contains("ConnectException") || cls.contains("SocketException"))
+    }
+
+    @Test
+    fun testLoginPassesCustomUsernameAndSkipsPinningHttpNoPin() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(loginResponse))
+        server.start()
+
+        try {
+            val trustStore = TrustStore()
+            val client = OkHttpClient()
+            val sessionManager = SessionManager(UbusClient(client), trustStore, client)
+
+            val profile = RouterProfile(
+                id = "http-p1",
+                name = "HTTP Router",
+                address = server.url("/").toString().removeSuffix("/"),
+                certificateFingerprint = SessionManager.HTTP_NO_PIN
+            )
+
+            val session = sessionManager.login(profile, "secret_password", username = "admin")
+            assertEquals("sess_token_12345", session.token)
+            assertNull("HTTP_NO_PIN sentinel must never be stored in TrustStore", trustStore.getPinned(profile.address))
+
+            val recorded = server.takeRequest()
+            val body = recorded.body.readUtf8()
+            assertTrue("Login must forward entered username", body.contains("\"username\":\"admin\""))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testLoginWithPreferVpnTargetsVpnEndpointDirectly() = runBlocking {
+        val homeServer = MockWebServer().apply { enqueue(MockResponse().setResponseCode(200).setBody(loginResponse)); start() }
+        val vpnServer = MockWebServer().apply { enqueue(MockResponse().setResponseCode(200).setBody(loginResponse)); start() }
+
+        try {
+            val trustStore = TrustStore()
+            val client = OkHttpClient()
+            val sessionManager = SessionManager(UbusClient(client), trustStore, client)
+
+            val profile = RouterProfile(
+                id = "vpn-first",
+                name = "Router",
+                address = homeServer.url("/").toString().removeSuffix("/"),
+                certificateFingerprint = SessionManager.HTTP_NO_PIN,
+                vpnAddress = vpnServer.url("/").toString().removeSuffix("/"),
+                vpnCertificateFingerprint = SessionManager.HTTP_NO_PIN
+            )
+
+            sessionManager.login(profile, "pw", preferVpn = true)
+            val state = sessionManager.sessionState.value as SessionState.LoggedIn
+            assertEquals(profile.vpnAddress, state.endpoint)
+            assertTrue(state.viaVpn)
+            assertEquals("Home server must not be contacted when preferVpn is true", 0, homeServer.requestCount)
+            assertEquals(1, vpnServer.requestCount)
+        } finally {
+            homeServer.shutdown()
+            vpnServer.shutdown()
+        }
+    }
+
+    @Test
+    fun testSessionMutexSerializesSlowResumeBeforeLogout() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBodyDelay(250, TimeUnit.MILLISECONDS).setBody(destroyResponse))
+        server.start()
+
+        try {
+            val trustStore = TrustStore()
+            val client = OkHttpClient()
+            val sessionManager = SessionManager(UbusClient(client), trustStore, client)
+            val profile = RouterProfile(
+                id = "r-mutex",
+                name = "Router",
+                address = server.url("/").toString().removeSuffix("/"),
+                certificateFingerprint = SessionManager.HTTP_NO_PIN
+            )
+            val saved = SavedSession(profile.id, "old-token", profile.address, false, System.currentTimeMillis())
+
+            val resumeJob = async { sessionManager.resume(profile, saved) }
+            delay(40)
+            val logoutJob = async { sessionManager.logout() }
+
+            resumeJob.await()
+            logoutJob.await()
+
+            assertTrue("Logout after slow resume must remain LoggedOut", sessionManager.sessionState.value is SessionState.LoggedOut)
+            assertNull(sessionManager.currentActiveToken)
+        } finally {
+            server.shutdown()
+        }
     }
 
     private fun createThrowawayKeyStoreAndCert(

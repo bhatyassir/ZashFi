@@ -67,6 +67,7 @@ class DualAddressTest {
         assertTrue(RouteChooser.tryNextAddress(UbusError.NetworkError(ConnectException("refused"))))
         assertTrue(RouteChooser.tryNextAddress(UbusError.NetworkError(SocketTimeoutException("timeout"))))
         assertTrue(RouteChooser.tryNextAddress(UbusError.NetworkError(java.net.NoRouteToHostException("no route"))))
+        assertTrue(RouteChooser.tryNextAddress(UbusError.NetworkError(java.net.SocketException("Network is unreachable"))))
         // Never on a security problem or a wrong password.
         assertFalse(RouteChooser.tryNextAddress(UbusError.AccessDenied()))
         assertFalse(RouteChooser.tryNextAddress(UbusError.NetworkError(SSLHandshakeException("bad cert"))))

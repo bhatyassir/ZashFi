@@ -2,6 +2,7 @@ package com.shaazifi.app.core.session
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -19,6 +20,17 @@ sealed class UnlockResult {
 
 /** Shows the system fingerprint / face / PIN prompt (androidx.biometric 1.1.0). */
 object BiometricGate {
+
+    /** Unwraps [ContextWrapper] chains to find the hosting [FragmentActivity], or null if none. */
+    fun findActivity(context: Context): FragmentActivity? {
+        var current: Context? = context
+        val seen = HashSet<Context>()
+        while (current != null && seen.add(current)) {
+            if (current is FragmentActivity) return current
+            current = (current as? ContextWrapper)?.baseContext
+        }
+        return null
+    }
 
     /** True when the phone has a PIN, pattern or password. Saved passwords and the lock need one. */
     fun deviceIsSecure(context: Context): Boolean =

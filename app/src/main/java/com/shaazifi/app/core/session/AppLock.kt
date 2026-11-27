@@ -1,5 +1,6 @@
 package com.shaazifi.app.core.session
 
+import android.os.Build
 import androidx.biometric.BiometricManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +35,7 @@ class AppLock(private val now: () -> Long) {
 
     private var stoppedAt: Long? = null
     private var authenticating = false
+    private var authStartedAt: Long? = null
 
     fun configure(enabled: Boolean, timeout: LockTimeout) {
         val wasEnabled = this.enabled
@@ -43,7 +45,9 @@ class AppLock(private val now: () -> Long) {
     }
 
     fun onAppStopped() {
-        if (!authenticating) stoppedAt = now()
+        // If leaving while an external PIN/biometric screen is open, anchor to authStartedAt
+        // so returning after timeout.millis still locks cleanly.
+        stoppedAt = if (authenticating) authStartedAt ?: now() else now()
     }
 
     fun onAppStarted() {
@@ -56,13 +60,20 @@ class AppLock(private val now: () -> Long) {
         if (enabled) _locked.value = true
     }
 
-    /** The PIN screen on older Android is a separate screen; leaving for it must not count as "away". */
-    fun authenticationStarted() { authenticating = true }
+    /** The PIN screen on older Android is a separate screen; track when auth began. */
+    fun authenticationStarted() {
+        authenticating = true
+        authStartedAt = now()
+    }
 
-    fun authenticationEnded() { authenticating = false }
+    fun authenticationEnded() {
+        authenticating = false
+        authStartedAt = null
+    }
 
     fun unlocked() {
         authenticating = false
+        authStartedAt = null
         stoppedAt = null
         _locked.value = false
     }
@@ -71,8 +82,8 @@ class AppLock(private val now: () -> Long) {
 /**
  * Which unlock methods the fingerprint/PIN prompt may offer. androidx.biometric
  * PromptInfo.Builder#setAllowedAuthenticators (developer.android.com, read 2026-11-17):
- * BIOMETRIC_STRONG | DEVICE_CREDENTIAL is unsupported on API 28-29, and DEVICE_CREDENTIAL alone
- * is unsupported before API 30. On 28-29 the prompt offers BIOMETRIC_WEAK | DEVICE_CREDENTIAL.
+ * BIOMETRIC_STRONG | DEVICE_CREDENTIAL is unsupported before API 30, and DEVICE_CREDENTIAL alone
+ * is unsupported before API 30. Below API 30 (R) the prompt offers BIOMETRIC_WEAK | DEVICE_CREDENTIAL.
  */
 object UnlockRules {
     const val BIOMETRIC_STRONG = BiometricManager.Authenticators.BIOMETRIC_STRONG
@@ -80,5 +91,5 @@ object UnlockRules {
     const val DEVICE_CREDENTIAL = BiometricManager.Authenticators.DEVICE_CREDENTIAL
 
     fun allowedAuthenticators(sdk: Int): Int =
-        if (sdk in 28..29) BIOMETRIC_WEAK or DEVICE_CREDENTIAL else BIOMETRIC_STRONG or DEVICE_CREDENTIAL
+        if (sdk < Build.VERSION_CODES.R) BIOMETRIC_WEAK or DEVICE_CREDENTIAL else BIOMETRIC_STRONG or DEVICE_CREDENTIAL
 }

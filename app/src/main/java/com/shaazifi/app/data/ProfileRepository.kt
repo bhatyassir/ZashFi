@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -109,9 +111,15 @@ object ProfileJsonAdapter {
         return json.encodeToString(profiles)
     }
 
+    fun listFromJsonOrThrow(jsonStr: String): List<RouterProfile> {
+        val trimmed = jsonStr.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        return json.decodeFromString<List<RouterProfile>>(trimmed)
+    }
+
     fun listFromJson(jsonStr: String): List<RouterProfile> {
         return try {
-            json.decodeFromString<List<RouterProfile>>(jsonStr)
+            listFromJsonOrThrow(jsonStr)
         } catch (_: Exception) {
             emptyList()
         }
@@ -140,13 +148,13 @@ class DataStoreProfileRepository(
     override fun getProfiles(): Flow<List<RouterProfile>> {
         return dataStore.data.map { prefs ->
             val jsonStr = prefs[profilesKey] ?: "[]"
-            ProfileJsonAdapter.listFromJson(jsonStr)
+            ProfileJsonAdapter.listFromJsonOrThrow(jsonStr)
         }
     }
 
     override suspend fun saveProfile(profile: RouterProfile) {
         dataStore.edit { prefs ->
-            val current = ProfileJsonAdapter.listFromJson(prefs[profilesKey] ?: "[]").toMutableList()
+            val current = ProfileJsonAdapter.listFromJsonOrThrow(prefs[profilesKey] ?: "[]").toMutableList()
             val existingIndex = current.indexOfFirst { it.id == profile.id }
             if (existingIndex >= 0) {
                 current[existingIndex] = profile
@@ -159,7 +167,7 @@ class DataStoreProfileRepository(
 
     override suspend fun deleteProfile(id: String) {
         dataStore.edit { prefs ->
-            val current = ProfileJsonAdapter.listFromJson(prefs[profilesKey] ?: "[]").toMutableList()
+            val current = ProfileJsonAdapter.listFromJsonOrThrow(prefs[profilesKey] ?: "[]").toMutableList()
             current.removeAll { it.id == id }
             prefs[profilesKey] = ProfileJsonAdapter.listToJson(current)
         }
@@ -178,11 +186,12 @@ class InMemoryProfileRepository(
     initial: List<RouterProfile> = emptyList()
 ) : ProfileRepository {
 
+    private val mutex = Mutex()
     private val _profiles = MutableStateFlow(initial)
 
     override fun getProfiles(): Flow<List<RouterProfile>> = _profiles.asStateFlow()
 
-    override suspend fun saveProfile(profile: RouterProfile) {
+    override suspend fun saveProfile(profile: RouterProfile) = mutex.withLock {
         val current = _profiles.value.toMutableList()
         val index = current.indexOfFirst { it.id == profile.id }
         if (index >= 0) {
@@ -193,13 +202,13 @@ class InMemoryProfileRepository(
         _profiles.value = current
     }
 
-    override suspend fun deleteProfile(id: String) {
+    override suspend fun deleteProfile(id: String) = mutex.withLock {
         val current = _profiles.value.toMutableList()
         current.removeAll { it.id == id }
         _profiles.value = current
     }
 
-    override suspend fun getProfileById(id: String): RouterProfile? {
-        return _profiles.value.find { it.id == id }
+    override suspend fun getProfileById(id: String): RouterProfile? = mutex.withLock {
+        _profiles.value.find { it.id == id }
     }
 }

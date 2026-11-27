@@ -57,7 +57,12 @@ class DataStoreSecretBox(private val dataStore: DataStore<Preferences>) : Secret
 class SecretStore(private val box: SecretBox, private val cipher: SecretCipher) {
 
     suspend fun save(profileId: String, kind: SecretKind, secret: String) {
-        val blob = cipher.encrypt(secret.toByteArray(Charsets.UTF_8), aad(profileId, kind))
+        val plain = secret.toByteArray(Charsets.UTF_8)
+        val blob = try {
+            cipher.encrypt(plain, aad(profileId, kind))
+        } finally {
+            plain.fill(0)
+        }
         box.put(keyFor(profileId, kind), Base64.getEncoder().encodeToString(blob))
     }
 
@@ -69,7 +74,12 @@ class SecretStore(private val box: SecretBox, private val cipher: SecretCipher) 
         } catch (_: IllegalArgumentException) {
             throw SecretUnavailableException.Tampered()
         }
-        return String(cipher.decrypt(blob, aad(profileId, kind)), Charsets.UTF_8)
+        val plain = cipher.decrypt(blob, aad(profileId, kind))
+        return try {
+            String(plain, Charsets.UTF_8)
+        } finally {
+            plain.fill(0)
+        }
     }
 
     suspend fun has(profileId: String, kind: SecretKind): Boolean = box.get(keyFor(profileId, kind)) != null

@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
@@ -64,6 +66,7 @@ class SessionManager(
     /** Called on sign out, to delete the kept session. */
     private val onSignedOut: suspend () -> Unit = {}
 ) {
+    private val sessionMutex = Mutex()
     private val _sessionState = MutableStateFlow<SessionState>(SessionState.LoggedOut)
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
@@ -72,6 +75,10 @@ class SessionManager(
 
     val currentProfile: RouterProfile?
         get() = (_sessionState.value as? SessionState.LoggedIn)?.profile
+
+    companion object {
+        const val HTTP_NO_PIN = "HTTP_NO_PIN"
+    }
 
     /**
      * Probes an unknown router endpoint to extract its TLS certificate fingerprint (or confirm HTTP reachability).
@@ -87,9 +94,9 @@ class SessionManager(
             "https://$trimmed"
         }
 
-        val isHttp = normalized.startsWith("http://")
+        val isHttp = normalized.startsWith("http://", ignoreCase = true)
 
-        val existingPin = trustStore.getPinned(normalized)
+        val existingPin = if (!isHttp) trustStore.getPinned(normalized) else null
         if (existingPin != null) {
             return@withContext Result.success(existingPin)
         }
@@ -112,12 +119,10 @@ class SessionManager(
                     try {
                         val sslSocket = connection.socket() as? javax.net.ssl.SSLSocket
                         val certs = sslSocket?.session?.peerCertificates
-                        println("DEBUG connectionAcquired: sslSocket=$sslSocket, certs=${certs?.size}")
                         if (!certs.isNullOrEmpty()) {
                             capturedPeerCert = certs[0] as? X509Certificate
                         }
-                    } catch (t: Throwable) {
-                        println("DEBUG connectionAcquired threw: $t")
+                    } catch (_: Throwable) {
                     }
                 }
             })
@@ -136,7 +141,7 @@ class SessionManager(
                     Result.success(fp)
                 } else if (response.request.url.isHttps.not() || isHttp) {
                     // Plain HTTP reached without certificate pinning per blueprint
-                    Result.success("HTTP_NO_PIN")
+                    Result.success(HTTP_NO_PIN)
                 } else {
                     val diag = ProbeDiagnostic(
                         exceptionClass = "IllegalStateException",
@@ -187,18 +192,24 @@ class SessionManager(
      */
     suspend fun login(
         profile: RouterProfile,
-        password: String
-    ): UbusSession {
+        password: String,
+        username: String = "root",
+        preferVpn: Boolean = false
+    ): UbusSession = sessionMutex.withLock {
         _sessionState.value = SessionState.LoggingIn
-        val endpoints = profile.endpoints()
+        val allEndpoints = profile.endpoints()
+        val endpoints = if (preferVpn) allEndpoints.filter { it.viaVpn }.ifEmpty { allEndpoints } else allEndpoints
+        val cleanUsername = username.trim().ifBlank { "root" }
         endpoints.forEachIndexed { i, e ->
             try {
-                // Pin the certificate approved for this address before anything is sent to it.
-                trustStore.pin(e.address, e.fingerprint)
+                // Pin the certificate approved for this address before anything is sent to it (skip cleartext HTTP).
+                if (e.fingerprint != HTTP_NO_PIN && e.fingerprint.isNotBlank()) {
+                    trustStore.pin(e.address, e.fingerprint)
+                }
 
                 val session = ubusClient.login(
                     endpointUrl = e.address,
-                    username = "root",
+                    username = cleanUsername,
                     password = password,
                     timeoutSeconds = loginTimeoutSeconds
                 )
@@ -213,7 +224,12 @@ class SessionManager(
                 _sessionState.value = loggedIn
                 runCatching { onSignedIn(loggedIn) }
 
-                return session
+                return@withLock session
+            } catch (ex: CancellationException) {
+                if (_sessionState.value is SessionState.LoggingIn) {
+                    _sessionState.value = SessionState.LoggedOut
+                }
+                throw ex
             } catch (ex: Exception) {
                 // Move to the VPN address only when the home address could not be reached at all.
                 if (i < endpoints.lastIndex && RouteChooser.tryNextAddress(ex)) return@forEachIndexed
@@ -227,7 +243,7 @@ class SessionManager(
     /**
      * Invalids active session via session.destroy and clears memory.
      */
-    suspend fun logout() {
+    suspend fun logout() = sessionMutex.withLock {
         val current = _sessionState.value
         if (current is SessionState.LoggedIn) {
             try {
@@ -241,23 +257,25 @@ class SessionManager(
     }
 
     /** Check the kept token using the current profile's approved addresses and pins. */
-    suspend fun resume(profile: RouterProfile, saved: SavedSession): ResumeResult {
+    suspend fun resume(profile: RouterProfile, saved: SavedSession): ResumeResult = sessionMutex.withLock {
         require(profile.id == saved.profileId)
         val endpoints = profile.endpoints()
         val preferred = endpoints.firstOrNull { it.address == saved.endpoint && it.viaVpn == saved.viaVpn }
-            ?: return ResumeResult.Unavailable
+            ?: return@withLock ResumeResult.Unavailable
         val ordered = listOf(preferred) + endpoints.filter { it != preferred }
         for (endpoint in ordered) {
             try {
-                trustStore.pin(endpoint.address, endpoint.fingerprint)
+                if (endpoint.fingerprint != HTTP_NO_PIN && endpoint.fingerprint.isNotBlank()) {
+                    trustStore.pin(endpoint.address, endpoint.fingerprint)
+                }
                 ubusClient.call(endpoint.address, saved.token, "system", "board")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UbusError.AccessDenied) {
-                return ResumeResult.Rejected
+                return@withLock ResumeResult.Rejected
             } catch (e: Exception) {
                 if (RouteChooser.tryNextAddress(e)) continue
-                return when {
+                return@withLock when {
                     e is UbusError.NetworkError && e.cause is SocketException -> ResumeResult.Unreachable
                     e is UbusError.HttpError && e.statusCode in 500..599 -> ResumeResult.Unreachable
                     else -> ResumeResult.Unavailable
@@ -279,8 +297,8 @@ class SessionManager(
                 // Resume still works in memory if the encrypted copy cannot be refreshed.
             }
             _sessionState.value = session
-            return ResumeResult.Restored
+            return@withLock ResumeResult.Restored
         }
-        return ResumeResult.Unreachable
+        return@withLock ResumeResult.Unreachable
     }
 }

@@ -1,5 +1,6 @@
 package com.shaazifi.app.core.session
 
+import com.shaazifi.app.feature.lock.needsLockVerification
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -107,16 +108,75 @@ class SavedPasswordAndLockTest {
     @Test
     fun unlockMethodsFollowTheAndroidVersion() {
         // androidx.biometric PromptInfo.Builder#setAllowedAuthenticators: BIOMETRIC_STRONG | DEVICE_CREDENTIAL
-        // is unsupported on API 28-29; DEVICE_CREDENTIAL alone is unsupported before API 30.
+        // and DEVICE_CREDENTIAL alone are unsupported before API 30 (R).
         val strong = UnlockRules.BIOMETRIC_STRONG
         val weak = UnlockRules.BIOMETRIC_WEAK
         val pin = UnlockRules.DEVICE_CREDENTIAL
-        assertEquals(strong or pin, UnlockRules.allowedAuthenticators(26))
-        assertEquals(strong or pin, UnlockRules.allowedAuthenticators(27))
+        assertEquals(weak or pin, UnlockRules.allowedAuthenticators(26))
+        assertEquals(weak or pin, UnlockRules.allowedAuthenticators(27))
         assertEquals(weak or pin, UnlockRules.allowedAuthenticators(28))
         assertEquals(weak or pin, UnlockRules.allowedAuthenticators(29))
         assertEquals(strong or pin, UnlockRules.allowedAuthenticators(30))
         assertEquals(strong or pin, UnlockRules.allowedAuthenticators(37))
+    }
+
+    @Test
+    fun appLockTracksAuthStartedAtAndLocksAfterTimeout() {
+        var now = 1_000L
+        val lock = AppLock(now = { now })
+        lock.configure(enabled = true, timeout = LockTimeout.ONE_MINUTE)
+        lock.unlocked()
+
+        // Short trip to external PIN screen stays unlocked.
+        lock.authenticationStarted()
+        now += 2_000
+        lock.onAppStopped()
+        now += 5_000
+        lock.onAppStarted()
+        assertFalse("returning within timeout while authenticating stays unlocked", lock.locked.value)
+        lock.authenticationEnded()
+
+        // Leaving while authenticating and returning after timeout.millis must lock.
+        lock.authenticationStarted()
+        lock.onAppStopped()
+        now += LockTimeout.ONE_MINUTE.millis
+        lock.onAppStarted()
+        assertTrue("returning after timeout.millis while authenticating must lock", lock.locked.value)
+        lock.unlocked()
+        assertFalse(lock.locked.value)
+    }
+
+    @Test
+    fun lockVerificationRequiredForEnableDisableAndLengtheningTimeout() {
+        assertTrue(needsLockVerification(false, LockTimeout.ONE_MINUTE, true, LockTimeout.ONE_MINUTE))
+        assertTrue(needsLockVerification(true, LockTimeout.ONE_MINUTE, false, LockTimeout.ONE_MINUTE))
+        assertTrue(needsLockVerification(true, LockTimeout.ONE_MINUTE, true, LockTimeout.FIVE_MINUTES))
+        assertFalse(needsLockVerification(true, LockTimeout.FIVE_MINUTES, true, LockTimeout.ONE_MINUTE))
+        assertFalse(needsLockVerification(true, LockTimeout.ONE_MINUTE, true, LockTimeout.ONE_MINUTE))
+        assertFalse(needsLockVerification(false, LockTimeout.ONE_MINUTE, false, LockTimeout.FIVE_MINUTES))
+    }
+
+    @Test
+    fun secretStoreZeroesIntermediatePlaintextBuffersOnSaveAndLoad() = runBlocking {
+        var encryptedPlainRef: ByteArray? = null
+        var decryptedPlainRef: ByteArray? = null
+        val recordingCipher = object : SecretCipher {
+            private val delegate = FakeCipher()
+            override fun encrypt(plain: ByteArray, aad: ByteArray): ByteArray {
+                encryptedPlainRef = plain
+                return delegate.encrypt(plain, aad)
+            }
+            override fun decrypt(blob: ByteArray, aad: ByteArray): ByteArray {
+                return delegate.decrypt(blob, aad).also { decryptedPlainRef = it }
+            }
+        }
+        val store = SecretStore(MemoryBox(), recordingCipher)
+        store.save("r1", SecretKind.ROUTER, "top-secret")
+        assertTrue("save must zero plaintext buffer", encryptedPlainRef!!.all { it == 0.toByte() })
+
+        val loaded = store.load("r1", SecretKind.ROUTER)
+        assertEquals("top-secret", loaded)
+        assertTrue("load must zero decrypted plaintext buffer", decryptedPlainRef!!.all { it == 0.toByte() })
     }
 
     @Test
