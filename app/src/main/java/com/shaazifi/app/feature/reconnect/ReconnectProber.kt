@@ -1,23 +1,28 @@
 package com.shaazifi.app.feature.reconnect
 
+import android.os.SystemClock
 import com.shaazifi.app.core.net.AddressGuard
 import com.shaazifi.app.core.net.CertificateChangedException
+import com.shaazifi.app.core.net.HttpFactory
 import com.shaazifi.app.core.net.TrustStore
 import com.shaazifi.app.core.net.UntrustedCertificateException
+import com.shaazifi.app.feature.routers.RouterDisplay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.IOException
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 sealed interface ReconnectState {
     data class Probing(val remainingSeconds: Int, val elapsedSeconds: Int) : ReconnectState
     data class ReconnectedKept(val newAddress: String) : ReconnectState
+    data class ReconnectedSameAddress(val address: String) : ReconnectState
     data class ReconnectedRolledBack(val oldAddress: String) : ReconnectState
     data class CertificateChanged(val presentedFingerprint: String) : ReconnectState
     data object TimeoutUnreachable : ReconnectState
@@ -25,11 +30,21 @@ sealed interface ReconnectState {
 
 class ReconnectProber(
     private val totalDurationSeconds: Int = DEFAULT_DURATION_SECONDS,
-    private val probeIntervalMs: Long = DEFAULT_INTERVAL_MS
+    private val probeIntervalMs: Long = DEFAULT_INTERVAL_MS,
+    private val elapsedRealtimeMs: () -> Long = ::defaultElapsedRealtime
 ) {
     companion object {
         const val DEFAULT_DURATION_SECONDS = 130 // Exceeds 120s OpenWrt rollback timer
         const val DEFAULT_INTERVAL_MS = 2000L    // 2s probing interval per blueprint
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        private const val UBUS_PROBE_BODY = """{"jsonrpc":"2.0","id":1,"method":"list"}"""
+
+        private fun defaultElapsedRealtime(): Long = try {
+            SystemClock.elapsedRealtime()
+        } catch (_: RuntimeException) {
+            // Pure JVM unit tests do not mock android.os.SystemClock; fall back to monotonic nanoTime.
+            System.nanoTime() / 1_000_000L
+        }
     }
 
     fun probe(
@@ -43,12 +58,12 @@ class ReconnectProber(
             host != null && AddressGuard.isAllowed(host)
         }
 
-        val client = buildProbeClient(pinnedFingerprint)
-        val startTime = System.currentTimeMillis()
+        val client = buildProbeClient(pinnedFingerprint, currentAddress, validCandidate)
+        val startTime = elapsedRealtimeMs()
         val totalMs = totalDurationSeconds * 1000L
 
         while (true) {
-            val elapsedMs = System.currentTimeMillis() - startTime
+            val elapsedMs = (elapsedRealtimeMs() - startTime).coerceAtLeast(0L)
             val elapsedSeconds = (elapsedMs / 1000).toInt()
             val remainingSeconds = (totalDurationSeconds - elapsedSeconds).coerceAtLeast(0)
 
@@ -72,12 +87,16 @@ class ReconnectProber(
                 }
             }
 
-            // 2. Try Current Address (checking if changes rolled back)
+            // 2. Try Current Address (either normal reconnect or rollback when a candidate was given)
             val currentResult = probeEndpoint(client, currentAddress)
             when (currentResult) {
                 is ProbeOutcome.Success -> {
-                    // Router responded at current address
-                    emit(ReconnectState.ReconnectedRolledBack(currentAddress))
+                    val outcome = if (candidateAddress == null) {
+                        ReconnectState.ReconnectedSameAddress(currentAddress)
+                    } else {
+                        ReconnectState.ReconnectedRolledBack(currentAddress)
+                    }
+                    emit(outcome)
                     return@flow
                 }
                 is ProbeOutcome.CertChanged -> {
@@ -89,7 +108,8 @@ class ReconnectProber(
                 }
             }
 
-            if (elapsedMs >= totalMs) {
+            val afterProbeElapsedMs = (elapsedRealtimeMs() - startTime).coerceAtLeast(0L)
+            if (afterProbeElapsedMs >= totalMs) {
                 emit(ReconnectState.TimeoutUnreachable)
                 return@flow
             }
@@ -108,20 +128,30 @@ class ReconnectProber(
         client: OkHttpClient,
         address: String
     ): ProbeOutcome {
-        val host = address.toHttpUrlOrNull()?.host ?: return ProbeOutcome.Unreachable
-        if (!AddressGuard.isAllowed(host)) return ProbeOutcome.Unreachable
+        val parsed = address.toHttpUrlOrNull() ?: return ProbeOutcome.Unreachable
+        if (!AddressGuard.isAllowed(parsed.host)) return ProbeOutcome.Unreachable
 
-        val url = address.toHttpUrlOrNull()?.newBuilder()?.encodedPath("/ubus")?.build()
-            ?: return ProbeOutcome.Unreachable
+        val url = parsed.newBuilder().encodedPath("/ubus").build()
 
         val request = Request.Builder()
             .url(url)
-            .get()
+            .post(UBUS_PROBE_BODY.toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
         return try {
             client.newCall(request).execute().use { response ->
-                // Response received and TLS certificate verified against pin
+                // Require an HTTP 200 response from /ubus; reject 3xx captive-portal redirects, 404s, and HTML pages.
+                if (response.code != 200) {
+                    return ProbeOutcome.Unreachable
+                }
+                val contentType = response.header("Content-Type").orEmpty()
+                if (contentType.contains("html", ignoreCase = true)) {
+                    return ProbeOutcome.Unreachable
+                }
+                val body = response.body.string().trimStart()
+                if (body.startsWith("<")) {
+                    return ProbeOutcome.Unreachable
+                }
                 ProbeOutcome.Success
             }
         } catch (e: Exception) {
@@ -158,26 +188,27 @@ class ReconnectProber(
         return null
     }
 
-    private fun buildProbeClient(pinnedFingerprint: String): OkHttpClient {
+    private fun buildProbeClient(
+        pinnedFingerprint: String,
+        currentAddress: String,
+        candidateAddress: String?
+    ): OkHttpClient {
         val trustStore = TrustStore().apply {
-            pin("router", pinnedFingerprint)
+            if (pinnedFingerprint != RouterDisplay.HTTP_NO_PIN && pinnedFingerprint.isNotBlank()) {
+                pin(currentAddress, pinnedFingerprint)
+                candidateAddress?.let { pin(it, pinnedFingerprint) }
+                pin("router", pinnedFingerprint)
+            }
         }
 
-        return OkHttpClient.Builder()
+        return HttpFactory.createClient(trustStore)
+            .newBuilder()
             .connectTimeout(1500, TimeUnit.MILLISECONDS)
             .readTimeout(1500, TimeUnit.MILLISECONDS)
             .writeTimeout(1500, TimeUnit.MILLISECONDS)
-            .sslSocketFactory(trustStore.sslSocketFactory, trustStore.trustManager)
-            .hostnameVerifier(trustStore.hostnameVerifier)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .retryOnConnectionFailure(false)
             .build()
-    }
-
-    private fun getRootCause(throwable: Throwable): Throwable {
-        var cause: Throwable = throwable
-        while (cause.cause != null && cause.cause !== cause) {
-            cause = cause.cause!!
-        }
-        return cause
     }
 }

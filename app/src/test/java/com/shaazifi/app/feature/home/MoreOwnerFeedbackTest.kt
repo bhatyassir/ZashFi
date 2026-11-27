@@ -40,19 +40,23 @@ class MoreOwnerFeedbackTest {
         assertEquals(MainTab.Home, back.tab)
         assertFalse(back.canGoBack)
 
-        // Tab to tab: back returns to the tab you were on.
+        // Switching tabs never builds cross-tab Back history; Back walks pages inside a tab.
         val wifi = home.select(MainTab.Devices).select(MainTab.Wifi)
-        assertEquals(MainTab.Devices, wifi.back().tab)
-        assertEquals(MainTab.Home, wifi.back().back().tab)
+        assertEquals(MainTab.Wifi, wifi.back().tab)
+        assertFalse(wifi.canGoBack)
 
-        // Deep: More list -> a feature -> AdGuard tab -> a page; back walks the same way out.
-        val deep = home.select(MainTab.More).openMore(MorePage.Feature("log")).select(MainTab.AdGuard).openAdGuardPage("filters")
+        // Deep: a More page and an AdGuard page each pop back to their own tab root.
+        val deep = home.select(MainTab.More).openMore(MorePage.Feature("log"))
+            .select(MainTab.AdGuard).openAdGuardPage("filters")
         assertNull(deep.back().adGuardPage)
         assertEquals(MainTab.AdGuard, deep.back().tab)
-        assertEquals(MorePage.Feature("log"), deep.back().back().morePage)
-        assertNull(deep.back().back().back().morePage)
-        assertEquals(MainTab.More, deep.back().back().back().tab)
-        assertEquals(MainTab.Home, deep.back().back().back().back().tab)
+        assertFalse(deep.back().canGoBack)
+
+        // The page you left behind is still there when you switch back to its tab.
+        val more = deep.select(MainTab.More)
+        assertEquals(MorePage.Feature("log"), more.morePage)
+        assertNull(more.back().morePage)
+        assertEquals(MainTab.More, more.back().tab)
 
         // A screen opened straight from a shortcut still goes up one level.
         assertNull(ShellNavState().openWifiFeature("guest").back().wifiPage)

@@ -1,5 +1,7 @@
 package com.shaazifi.app.feature.home
 
+import com.shaazifi.app.data.DemoData
+
 /**
  * Made-up readings for demo mode. Makes no network calls at all.
  * Counters grow on every reading so speed and CPU look alive.
@@ -48,7 +50,8 @@ class DemoHomeRepository : HomeRepository {
             radios = listOf(
                 RadioSummary("Demo Home", "2.4 GHz", "6", true, 1, WifiNetworkKey("radio0", "home", "wlan0")),
                 RadioSummary("Demo Home 5G", "5 GHz", "36", true, 2, WifiNetworkKey("radio1", "home5g", "wlan1"))
-            )
+            ),
+            thermals = DemoData.thermals
         )
     }
 }

@@ -2,6 +2,9 @@ package com.shaazifi.app.feature.router
 
 import com.shaazifi.app.core.ubus.UbusError
 import com.shaazifi.app.feature.home.UbusCaller
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -55,10 +58,73 @@ class SafeChangeTest {
         controller.request(blockPlan)
         controller.confirm()
         val calls = router.log.map { it.substringBefore(' ') }
-        assertEquals(listOf("uci.add", "uci.apply", "file.exec", "system.board", "uci.confirm"), calls)
+        assertEquals(listOf("uci.add", "uci.apply", "system.board", "uci.confirm", "file.exec"), calls)
         assertTrue("apply must use the router's rollback timer", router.log[1].contains("\"rollback\":true") && router.log[1].contains("\"timeout\":120"))
-        assertTrue(router.log[2].contains("/etc/init.d/firewall") && router.log[2].contains("reload"))
+        assertTrue(router.log[4].contains("/etc/init.d/firewall") && router.log[4].contains("reload"))
         assertEquals(ChangeUiState.Done(ChangeOutcome.Kept), controller.state.value)
+    }
+
+    @Test
+    fun serviceFailureAfterConfirmIsReportedCleanly() = runBlocking {
+        val caller = object : UbusCaller {
+            val log = mutableListOf<String>()
+            override suspend fun call(ubusObject: String, method: String, args: JsonObject): JsonObject {
+                log += "$ubusObject.$method"
+                return if (ubusObject == "file" && method == "exec") {
+                    buildJsonObject { put("code", 1); put("stderr", "reload failed") }
+                } else JsonObject(emptyMap())
+            }
+        }
+        val outcome = SafeChangeRunner(RouterWriter(caller), probeAttempts = 1, probeDelayMs = 0).run(blockPlan)
+        assertTrue(outcome is ChangeOutcome.Failed)
+        assertTrue((outcome as ChangeOutcome.Failed).message.contains("reload failed"))
+        assertTrue("confirm happened before service exec", caller.log.indexOf("uci.confirm") < caller.log.indexOf("file.exec"))
+    }
+
+    @Test
+    fun probeStopsOnceMonotonicRollbackBudgetExpires() = runBlocking {
+        var nowNs = 0L
+        var boardCalls = 0
+        val caller = object : UbusCaller {
+            override suspend fun call(ubusObject: String, method: String, args: JsonObject): JsonObject {
+                if (ubusObject == "system" && method == "board") {
+                    boardCalls++
+                    nowNs += 35_000_000_000L // 35s per attempt
+                    throw UbusError.NetworkError(java.io.IOException("timeout"))
+                }
+                return JsonObject(emptyMap())
+            }
+        }
+        val runner = SafeChangeRunner(RouterWriter(caller), probeAttempts = 10, probeDelayMs = 0, longWaitAttempts = 33, clockNs = { nowNs })
+        val outcome = runner.run(blockPlan.copy(longWait = true))
+        assertEquals(ChangeOutcome.LostConnection, outcome)
+        assertEquals(4, boardCalls) // 0s->35s, 35s->70s, 70s->105s, 105s->140s (>=120s), then stops
+    }
+
+    @Test
+    fun cancellationDuringRunningResetsControllerAndRollsBack() = runBlocking {
+        val log = mutableListOf<String>()
+        val probing = CompletableDeferred<Unit>()
+        val caller = object : UbusCaller {
+            override suspend fun call(ubusObject: String, method: String, args: JsonObject): JsonObject {
+                log += "$ubusObject.$method"
+                if (ubusObject == "system" && method == "board") {
+                    probing.complete(Unit)
+                    kotlinx.coroutines.delay(60_000)
+                }
+                return JsonObject(emptyMap())
+            }
+        }
+        val controller = ChangeController(SafeChangeRunner(RouterWriter(caller), probeAttempts = 5, probeDelayMs = 0))
+        controller.request(blockPlan)
+        val job = launch { controller.confirm() }
+        probing.await()
+        assertTrue(controller.state.value is ChangeUiState.Running)
+        job.cancel()
+        job.join()
+        assertEquals(ChangeUiState.Idle, controller.state.value)
+        assertTrue("rollback sent under NonCancellable", log.contains("uci.rollback"))
+        assertFalse(log.contains("uci.confirm"))
     }
 
     @Test

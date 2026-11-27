@@ -39,6 +39,7 @@ import com.shaazifi.app.ui.theme.PillTone
 import com.shaazifi.app.ui.theme.SfText
 import com.shaazifi.app.ui.theme.SfTheme
 import kotlinx.coroutines.launch
+import java.net.SocketTimeoutException
 
 /** What a diagnostics run returned. */
 sealed class DiagResult {
@@ -46,6 +47,9 @@ sealed class DiagResult {
     data object NotPermitted : DiagResult()
     data class Failed(val message: String) : DiagResult()
 }
+
+private fun Throwable.hasSocketTimeout(): Boolean =
+    generateSequence(this) { it.cause }.any { it is SocketTimeoutException }
 
 /** Runs a diagnostic on the router with the read-only allowlist (or sample output in demo). */
 suspend fun runDiagnostic(reader: RouterReader?, tool: Diagnostics.Tool, host: String): DiagResult {
@@ -55,10 +59,14 @@ suspend fun runDiagnostic(reader: RouterReader?, tool: Diagnostics.Tool, host: S
     return try {
         val r = reader.execFirst(*commands.toTypedArray()) ?: return DiagResult.NotPermitted
         DiagResult.Output((r.stdout + if (r.stderr.isNotBlank()) "\n" + r.stderr else "").trim().ifBlank { "(no output)" }, ok = r.code == 0)
+    } catch (e: SocketTimeoutException) {
+        DiagResult.Failed("Diagnostic timed out")
     } catch (e: FeatureLoadException) {
-        DiagResult.Failed("Can't reach the router. Check that this phone is on its Wi-Fi or VPN.")
+        if (e.hasSocketTimeout()) DiagResult.Failed("Diagnostic timed out")
+        else DiagResult.Failed("Can't reach the router. Check that this phone is on its Wi-Fi or VPN.")
     } catch (e: Exception) {
-        DiagResult.Failed("Could not run it (${e::class.simpleName}).")
+        if (e.hasSocketTimeout()) DiagResult.Failed("Diagnostic timed out")
+        else DiagResult.Failed("Could not run it (${e::class.simpleName}).")
     }
 }
 
@@ -88,7 +96,7 @@ fun DiagnosticsScreen(run: suspend (Diagnostics.Tool, String) -> DiagResult) {
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth()
             )
-            if (host.isNotBlank() && !valid) Text("Letters, numbers, dots and hyphens only.", style = SfText.sub, color = c.bad)
+            if (host.isNotBlank() && !valid) Text("Letters, numbers, dots, hyphens, and colons (IPv6) only.", style = SfText.sub, color = c.bad)
             // Owner feedback 2026-11-18: one coloured tile per test.
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Diagnostics.Tool.entries.forEach { t ->

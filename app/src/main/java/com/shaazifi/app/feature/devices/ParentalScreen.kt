@@ -70,14 +70,14 @@ internal fun ParentalScreen(
             } else {
                 val device = list.devices.firstOrNull { it.mac == selectedMac }
                 if (device == null) Note("This device is unavailable.")
-                else DeviceRules(device, list.accessRules, changes)
+                else DeviceRules(device, list.accessRules, list.extraEgressZones, changes)
             }
         }
     }
 }
 
 @Composable
-private fun DeviceRules(device: Device, rules: List<AccessRule>?, changes: ChangeController) {
+private fun DeviceRules(device: Device, rules: List<AccessRule>?, extraEgressZones: List<String>, changes: ChangeController) {
     val c = SfTheme.colors
     val (status, tone) = devicePill(device)
     PageHeading(device.name, "Parental controls · ${device.connection.label}", status, tone)
@@ -86,6 +86,14 @@ private fun DeviceRules(device: Device, rules: List<AccessRule>?, changes: Chang
         InternetAction(device, rules, changes)
         if (rules != null) OutlinedButton(onClick = { scheduleOpen = true }) { Text("Add a schedule") }
     }
+    if (Makers.isRandomized(device.mac)) {
+        Note("This device uses a randomized (private) MAC address. Rotating or changing its private Wi-Fi address will bypass MAC-based rules.")
+    }
+    Note(
+        "Rules match MAC addresses leaving toward the main wan zone. Bridged/relayed IPv6 traffic or egress via other WAN/VPN zones" +
+            (if (extraEgressZones.isNotEmpty()) " (${extraEgressZones.joinToString(", ")})" else "") +
+            " may bypass these rules."
+    )
     SectionTitle("Schedules")
     if (rules == null) {
         Note("Schedules are unavailable for this router login.")
@@ -105,15 +113,25 @@ private fun DeviceRules(device: Device, rules: List<AccessRule>?, changes: Chang
         }
     }
     error?.let { Text(it, style = SfText.sub, color = c.bad) }
-    val form = remember(device.mac, device.name) {
+    val form = remember(device.mac, device.name, device.network?.sourceZone) {
         FeatureForm(
             "Add a schedule",
             listOf(FormField("days", "Days (blank for every day)", hint = "Mon Tue Wed"),
                 FormField("from", "Pause at", initial = "21:00"), FormField("to", "Resume at", initial = "07:00")),
             "Save schedule"
         ) { values ->
-            FeatureChanges.parentalSchedule(device.mac, values["days"].orEmpty(), values["from"].orEmpty(),
-                values["to"].orEmpty(), mapOf(device.mac to device.name))
+            validateScheduleTimes(
+                withSourceZone(
+                    FeatureChanges.parentalSchedule(
+                        device.mac,
+                        values["days"].orEmpty(),
+                        values["from"].orEmpty(),
+                        values["to"].orEmpty(),
+                        mapOf(device.mac to device.name)
+                    ),
+                    device.network?.sourceZone
+                )
+            )
         }
     }
     if (scheduleOpen) {

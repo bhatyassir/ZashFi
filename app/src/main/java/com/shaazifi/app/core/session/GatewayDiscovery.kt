@@ -48,6 +48,9 @@ class GatewayDiscovery(private val context: Context) {
             if (!list.contains("https://192.168.1.1")) {
                 list.add("https://192.168.1.1")
             }
+            if (!list.contains("http://192.168.1.1")) {
+                list.add("http://192.168.1.1")
+            }
             return list
         }
 }

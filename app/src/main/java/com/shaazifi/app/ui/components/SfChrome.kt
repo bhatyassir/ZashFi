@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -32,6 +31,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,7 +65,7 @@ fun SfTopBar(
             .fillMaxWidth()
             .background(c.bg)
             .padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 4.dp)
-            .height(44.dp),
+            .heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -125,7 +125,7 @@ internal fun ReviewRouterBar(
         Row(Modifier.fillMaxWidth().heightIn(min = 55.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
-                Modifier.weight(1f).clip(shape).clickable(onClickLabel = "Switch router", onClick = onSwitch)
+                Modifier.weight(1f).clip(shape).clickable(role = Role.Button, onClickLabel = "Switch router", onClick = onSwitch)
                     .heightIn(min = 48.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)
             ) {
@@ -141,14 +141,20 @@ internal fun ReviewRouterBar(
             if (demo) Pill("Demo", tone = PillTone.Off)
             IconButton(
                 onClick = onTheme,
-                modifier = Modifier.size(42.dp).border(1.dp, c.line, shape)
+                modifier = Modifier.size(48.dp)
             ) {
-                Icon(if (dark) SfIcons.Sun else SfIcons.Moon, if (dark) "Use light theme" else "Use dark theme",
-                    tint = c.muted, modifier = Modifier.size(20.dp))
+                Box(Modifier.size(42.dp).border(1.dp, c.line, shape), contentAlignment = Alignment.Center) {
+                    Icon(
+                        if (dark) SfIcons.Sun else SfIcons.Moon,
+                        if (dark) "Use light theme" else "Use dark theme",
+                        tint = c.muted,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
             if (menu.isNotEmpty()) {
                 Box {
-                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(48.dp)) {
                         Icon(SfIcons.MoreVertical, "More actions", tint = c.muted, modifier = Modifier.size(20.dp))
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
@@ -189,11 +195,13 @@ fun SfBottomBar(
                 Column(
                     modifier = Modifier
                         .weight(1f)
+                        .heightIn(min = 48.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (selected) c.accentSoft else c.surface)
                         .clickable(role = Role.Tab) { onSelect(index) }
                         .semantics {
                             this.selected = selected
+                            stateDescription = if (selected) "Selected" else "Not selected"
                             item.accessibleLabel?.let { contentDescription = it }
                         }
                         .padding(vertical = 8.dp),

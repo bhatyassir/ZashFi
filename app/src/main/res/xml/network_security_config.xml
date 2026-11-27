@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Base cleartext HTTP traffic is permitted here because home routers and local OpenWrt / AdGuard
+  Home instances are frequently reached on LAN or VPN addresses (RFC 1918, ULA, link-local, or
+  CGNAT/Tailnet ranges) without TLS, and Android's static network_security_config cannot express
+  dynamic private/VPN CIDR bounds.
+
+  All outbound app HTTP/HTTPS traffic is strictly gated at runtime by AddressGuard
+  (AddressGuardInterceptor and OkHttpAddressGuardDns in HttpFactory), which enforces
+  private/VPN-only bounds and refuses public IP addresses and public domains before connecting.
+-->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>

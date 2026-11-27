@@ -49,11 +49,12 @@ fun ReconnectScreen(
     modifier: Modifier = Modifier
 ) {
     val prober = remember { ReconnectProber() }
-    var reconnectState by remember {
+    var attempt by remember(profile.id, candidateAddress) { mutableStateOf(0) }
+    var reconnectState by remember(profile.id, candidateAddress) {
         mutableStateOf<ReconnectState>(ReconnectState.Probing(ReconnectProber.DEFAULT_DURATION_SECONDS, 0))
     }
 
-    LaunchedEffect(profile.id, candidateAddress) {
+    LaunchedEffect(profile.id, candidateAddress, attempt) {
         prober.probe(
             currentAddress = profile.address,
             candidateAddress = candidateAddress,
@@ -103,6 +104,10 @@ fun ReconnectScreen(
                 Text(RouterDisplay.hostLabel(state.newAddress), style = SfText.mono, color = c.ink)
                 PrimaryButton(text = "Continue", onClick = { onReconnected(state.newAddress) })
             }
+            is ReconnectState.ReconnectedSameAddress -> {
+                Text(RouterDisplay.hostLabel(state.address), style = SfText.mono, color = c.ink)
+                PrimaryButton(text = "Continue", onClick = { onReconnected(state.address) })
+            }
             is ReconnectState.ReconnectedRolledBack -> {
                 Text(RouterDisplay.hostLabel(state.oldAddress), style = SfText.mono, color = c.ink)
                 PrimaryButton(text = "Continue with the old settings", onClick = { onReconnected(state.oldAddress) })
@@ -121,6 +126,13 @@ fun ReconnectScreen(
                 PrimaryButton(text = "Back to safety", onClick = onCancel)
             }
             ReconnectState.TimeoutUnreachable -> {
+                PrimaryButton(
+                    text = "Try again",
+                    onClick = {
+                        reconnectState = ReconnectState.Probing(ReconnectProber.DEFAULT_DURATION_SECONDS, 0)
+                        attempt++
+                    }
+                )
                 GhostButton(text = "Back to routers", onClick = onCancel)
             }
         }

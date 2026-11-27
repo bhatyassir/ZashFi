@@ -32,6 +32,7 @@ interface AdGuardRepository {
     suspend fun loadQueryLogClients(): List<AdGuardLogDevice> = emptyList()
     suspend fun setProtection(enabled: Boolean, durationMs: Long? = null)
     suspend fun setSafeBrowsing(enabled: Boolean)
+    suspend fun setParental(enabled: Boolean) {}
 }
 
 /**
@@ -81,12 +82,14 @@ class HttpAdGuardRepository(
     }
 
     override suspend fun setProtection(enabled: Boolean, durationMs: Long?) {
-        val password = passwordProvider() ?: throw AdGuardError.Unauthorized("Password required")
-        adGuardClient.setProtection(baseUrl, username, password, enabled, durationMs)
+        adGuardClient.setProtection(baseUrl, username, requirePassword(), enabled, durationMs)
     }
 
     override suspend fun setSafeBrowsing(enabled: Boolean) {
-        val password = passwordProvider() ?: throw AdGuardError.Unauthorized("Password required")
-        adGuardClient.setSafeBrowsing(baseUrl, username, password, enabled)
+        adGuardClient.setSafeBrowsing(baseUrl, username, requirePassword(), enabled)
+    }
+
+    override suspend fun setParental(enabled: Boolean) {
+        adGuardClient.setParental(baseUrl, username, requirePassword(), enabled)
     }
 }

@@ -135,11 +135,20 @@ class Capabilities private constructor(private val acl: Map<String, Map<String, 
 
     fun ubus(obj: String, fn: String) = allowed("ubus", obj, fn)
     fun uciRead(config: String) = allowed("uci", config, "read")
+    fun uciWrite(config: String) = allowed("uci", config, "write")
 
     /** False only when the ACL is known and lacks what the feature needs. */
     fun feature(id: String): Boolean {
-        val need = NEEDS[id] ?: return true
-        return need.all { (o, f) -> ubus(o, f) }
+        val ubusOk = NEEDS[id]?.all { (o, f) -> ubus(o, f) } ?: true
+        val uciOk = UCI_NEEDS[id]?.all { cfg -> uciRead(cfg) } ?: true
+        return ubusOk && uciOk
+    }
+
+    /** False when the ACL is known and lacks write/action permission for changes on [id]. */
+    fun canChangeFeature(id: String): Boolean {
+        val uciOk = UCI_WRITES[id]?.all { cfg -> uciWrite(cfg) } ?: true
+        val ubusOk = UBUS_WRITES[id]?.all { (o, f) -> ubus(o, f) } ?: true
+        return uciOk && ubusOk
     }
 
     companion object {
@@ -159,9 +168,51 @@ class Capabilities private constructor(private val acl: Map<String, Map<String, 
             "health" to listOf("system" to "info"),
             "software" to listOf("file" to "exec"),
             "usage" to listOf("file" to "exec"),
-            "traffic" to listOf("file" to "exec"),
+            "traffic" to listOf("network.device" to "status", "network.interface" to "dump"),
             "tailscale" to listOf("file" to "exec"),
             "mesh" to listOf("untangled.mesh" to "info")
+        )
+
+        private val UCI_NEEDS: Map<String, List<String>> = mapOf(
+            "routes" to listOf("network"),
+            "wan" to listOf("network"),
+            "lan" to listOf("network"),
+            "ipv6" to listOf("network"),
+            "dualwan" to listOf("mwan3"),
+            "ddns" to listOf("ddns"),
+            "parental" to listOf("firewall"),
+            "firewall" to listOf("firewall"),
+            "portfwd" to listOf("firewall"),
+            "dmz" to listOf("firewall"),
+            "upnp" to listOf("upnpd"),
+            "vpn" to listOf("network"),
+            "qos" to listOf("sqm"),
+            "admin" to listOf("system")
+        )
+
+        private val UCI_WRITES: Map<String, List<String>> = mapOf(
+            "wireless" to listOf("wireless"),
+            "guest" to listOf("wireless"),
+            "extend" to listOf("wireless", "network", "firewall"),
+            "routes" to listOf("network"),
+            "wan" to listOf("network"),
+            "lan" to listOf("dhcp"),
+            "ipv6" to listOf("network"),
+            "ddns" to listOf("ddns"),
+            "parental" to listOf("firewall"),
+            "firewall" to listOf("firewall"),
+            "portfwd" to listOf("firewall"),
+            "dmz" to listOf("firewall"),
+            "upnp" to listOf("upnpd"),
+            "protection" to listOf("adblock", "banip"),
+            "usb" to listOf("minidlna"),
+            "vpn" to listOf("network"),
+            "qos" to listOf("sqm"),
+            "admin" to listOf("system")
+        )
+
+        private val UBUS_WRITES: Map<String, List<Pair<String, String>>> = mapOf(
+            "services" to listOf("rc" to "init")
         )
 
         fun parse(reply: JsonObject): Capabilities = Capabilities(

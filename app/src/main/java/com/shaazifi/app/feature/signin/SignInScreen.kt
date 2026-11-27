@@ -54,6 +54,7 @@ import com.shaazifi.app.debug.DebugRouterConfig
 import com.shaazifi.app.core.session.ResumeResult
 import com.shaazifi.app.core.session.SessionState
 import com.shaazifi.app.data.RouterProfile
+import com.shaazifi.app.data.endpoints
 import com.shaazifi.app.feature.web.AuthenticatedRouterShell
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -62,7 +63,6 @@ import kotlinx.coroutines.launch
 import android.widget.Toast
 import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.LaunchedEffect
-import androidx.fragment.app.FragmentActivity
 import com.shaazifi.app.core.session.BiometricGate
 import com.shaazifi.app.core.session.SavedPassword
 import com.shaazifi.app.core.session.SavedPasswordResult
@@ -80,7 +80,7 @@ fun SignInScreen(
 ) {
     val context = LocalContext.current
     DisposableEffect(Unit) {
-        val window = (context as? Activity)?.window
+        val window = (BiometricGate.findActivity(context) ?: (context as? Activity))?.window
         if (!DebugRouterConfig.IS_DEBUG) {
             window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
@@ -95,17 +95,17 @@ fun SignInScreen(
     val scrollState = rememberScrollState()
     val sessionState by container.sessionManager.sessionState.collectAsState()
 
-    var username by remember { mutableStateOf("root") }
-    var password by remember { mutableStateOf("") }
-    var passwordVisible by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var username by remember(profile.id) { mutableStateOf("root") }
+    var password by remember(profile.id) { mutableStateOf("") }
+    var passwordVisible by remember(profile.id) { mutableStateOf(false) }
+    var errorMessage by remember(profile.id) { mutableStateOf<String?>(null) }
 
     // M9: saved password behind fingerprint / PIN. Hidden when the phone has no screen lock.
     val saved = remember(profile.id) {
         SavedPassword(
             store = container.secretStore,
             lock = container.appLock,
-            activity = context as? FragmentActivity,
+            activity = BiometricGate.findActivity(context),
             profileId = profile.id,
             kind = SecretKind.ROUTER,
             usable = BiometricGate.canUnlock(context)
@@ -132,6 +132,7 @@ fun SignInScreen(
                     ResumeResult.Restored -> return@LaunchedEffect
                     ResumeResult.Rejected -> break
                     ResumeResult.Unavailable -> {
+                        runCatching { container.savedSessions.clear(kept) }
                         resumeStatus = result
                         return@LaunchedEffect
                     }
@@ -161,12 +162,12 @@ fun SignInScreen(
         return
     }
 
-    fun fingerprintSignIn() {
+    fun fingerprintSignIn(preferVpn: Boolean = false) {
         errorMessage = null
         coroutineScope.launch {
             when (val r = saved.load()) {
                 is SavedPasswordResult.Value -> try {
-                    container.sessionManager.login(profile, r.secret)
+                    container.sessionManager.login(profile, r.secret, username = username, preferVpn = preferVpn)
                 } catch (e: Exception) {
                     errorMessage = RouterDisplay.signInError(e)
                 }
@@ -179,16 +180,44 @@ fun SignInScreen(
         }
     }
 
+    fun submitTypedSignIn(preferVpn: Boolean = false) {
+        if (password.isBlank()) {
+            errorMessage = "Enter the router password."
+            return
+        }
+        val submittedPassword = password
+        password = ""
+        errorMessage = null
+        coroutineScope.launch {
+            try {
+                container.sessionManager.login(profile, submittedPassword, username = username, preferVpn = preferVpn)
+                if (rememberPassword && saved.usable) {
+                    val problem = saved.save(submittedPassword)
+                    Toast.makeText(
+                        context,
+                        problem ?: "Password saved. Next time, sign in with your fingerprint.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                errorMessage = RouterDisplay.signInError(e)
+            }
+        }
+    }
+
     // Opened from a tile with a saved password: ask for the fingerprint straight away.
     // Owner feedback: fingerprint is the default once a password is saved (asked once per visit).
+    val appLocked by container.appLock.locked.collectAsState()
     var autoPrompted by remember(profile.id) { mutableStateOf(false) }
     var showTyped by remember(profile.id) { mutableStateOf(false) }
-    LaunchedEffect(quickAction, hasSaved, restoreSaved) {
-        if (!restoreSaved && hasSaved && saved.usable && !isLoggingIn && !autoPrompted) {
+    LaunchedEffect(quickAction, hasSaved, restoreSaved, appLocked) {
+        if (!appLocked && !restoreSaved && hasSaved && saved.usable && !isLoggingIn && !autoPrompted) {
             autoPrompted = true
             fingerprintSignIn()
         }
     }
+
+    val vpnEndpoint = remember(profile) { profile.endpoints().firstOrNull { it.viaVpn } }
 
     val c = SfTheme.colors
     val isHttp = RouterDisplay.isPlainHttp(profile)
@@ -302,39 +331,30 @@ fun SignInScreen(
         PrimaryButton(
             text = if (isLoggingIn) "Signing in..." else "Sign in",
             enabled = !isLoggingIn && password.isNotBlank(),
-            onClick = {
-                if (password.isBlank()) {
-                    errorMessage = "Enter the router password."
-                    return@PrimaryButton
-                }
-                val submittedPassword = password
-                password = ""
-                errorMessage = null
-                coroutineScope.launch {
-                    try {
-                        container.sessionManager.login(profile, submittedPassword)
-                        if (rememberPassword && saved.usable) {
-                            val problem = saved.save(submittedPassword)
-                            Toast.makeText(
-                                context,
-                                problem ?: "Password saved. Next time, sign in with your fingerprint.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                    } catch (e: Exception) {
-                        errorMessage = RouterDisplay.signInError(e)
-                    }
-                }
-            }
+            onClick = { submitTypedSignIn(preferVpn = false) }
         )
+        if (vpnEndpoint != null) {
+            GhostButton(
+                text = "Use VPN address",
+                enabled = !isLoggingIn && password.isNotBlank(),
+                onClick = { submitTypedSignIn(preferVpn = true) }
+            )
+        }
         }
         if (hasSaved && saved.usable) {
             if (!fingerprintFirst) TextButton(onClick = { showTyped = false }) { Text("Use the fingerprint instead") }
             PrimaryButton(
                 text = if (isLoggingIn) "Signing in..." else "Sign in with fingerprint",
                 enabled = !isLoggingIn,
-                onClick = { fingerprintSignIn() }
+                onClick = { fingerprintSignIn(preferVpn = false) }
             )
+            if (fingerprintFirst && vpnEndpoint != null) {
+                GhostButton(
+                    text = "Use VPN address",
+                    enabled = !isLoggingIn,
+                    onClick = { fingerprintSignIn(preferVpn = true) }
+                )
+            }
         }
         GhostButton(text = "Back to routers", onClick = onBack, enabled = !isLoggingIn)
         if (hasSaved) {

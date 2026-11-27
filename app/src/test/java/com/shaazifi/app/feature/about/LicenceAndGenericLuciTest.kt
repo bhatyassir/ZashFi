@@ -39,13 +39,19 @@ class LicenceAndGenericLuciTest {
         assertEquals("/cgi-bin/luci/admin/network/firewall/forwards", RouterWebPages.luciPath("portfwd"))
         assertEquals("/cgi-bin/luci/admin/status/logs", RouterWebPages.luciPath("log"))
         assertEquals("/cgi-bin/luci/", RouterWebPages.luciPath("not-a-feature"))
-        assertEquals("https://r/cgi-bin/luci/admin/services/ddns", RouterWebPages.target("https://r", RouterWebUi.Luci, "ddns"))
+        assertEquals("https://r/cgi-bin/luci/admin/services/nlbw/display", RouterWebPages.target("https://r", RouterWebUi.Luci, "usage"))
         assertEquals("https://r/untangled/#ddns", RouterWebPages.target("https://r", RouterWebUi.Untangled, "ddns"))
         assertEquals("https://r/cgi-bin/luci/", RouterWebPages.target("https://r", RouterWebUi.Luci, null))
         assertEquals("https://r/untangled/", RouterWebPages.target("https://r", RouterWebUi.Untangled, null))
-        // Every feature that offers "change in the router pages" has a LuCI page too.
-        Features.all.mapNotNull { it.untangledId }.filterNot { it == "mesh" }.forEach { id ->
+        // Every feature gets a web fallback, not just those with an UnTangled id.
+        Features.all.forEach { spec ->
+            val id = spec.untangledId ?: spec.id
             assertTrue("no LuCI page for $id", RouterWebPages.luciPath(id) != "/cgi-bin/luci/")
         }
+        // Paths that exist on every OpenWrt install; do not deep-link to LuCI apps that may be absent.
+        assertEquals("/cgi-bin/luci/admin/network/routes", RouterWebPages.luciPath("routes"))
+        assertEquals("/cgi-bin/luci/admin/status/logs/dmesg", RouterWebPages.luciPath("kernellog"))
+        assertEquals("/cgi-bin/luci/admin/services", RouterWebPages.luciPath("ddns"))
+        assertEquals("/cgi-bin/luci/admin/services", RouterWebPages.luciPath("upnp"))
     }
 }

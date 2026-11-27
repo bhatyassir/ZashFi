@@ -35,11 +35,35 @@ class FeatureChangesBatch3Test {
     @Test
     fun wanPlansAreValidatedAndCheckTheInternet() {
         val dhcp = plan(FeatureChanges.wan("static", "dhcp", "", "", "", "", "", ""))
-        assertEquals(UciOp.Set("network", "wan", mapOf("proto" to "dhcp", "peerdns" to "1")), dhcp.ops.single())
+        assertEquals(UciOp.Set("network", "wan", mapOf("proto" to "dhcp", "peerdns" to "1")), dhcp.ops.first())
+        assertTrue(dhcp.ops.containsAll(listOf(
+            UciOp.DeleteOption("network", "wan", "ipaddr"),
+            UciOp.DeleteOption("network", "wan", "netmask"),
+            UciOp.DeleteOption("network", "wan", "gateway"),
+            UciOp.DeleteOption("network", "wan", "dns")
+        )))
+        assertTrue(dhcp.ops.all { ok(it) })
         assertTrue(dhcp.checkInternet)
 
+        val existing = FeatureMappersTest.uci("""{"wan":{".type":"interface","proto":"pppoe","username":"u","password":"p","dns":["1.1.1.1"]}}""").byId("wan")
+        val dhcpFromPpp = plan(FeatureChanges.wan("pppoe", "dhcp", "", "", "", "", "", "", existingWan = existing))
+        assertEquals(
+            listOf(
+                UciOp.Set("network", "wan", mapOf("proto" to "dhcp", "peerdns" to "1")),
+                UciOp.DeleteOption("network", "wan", "username"),
+                UciOp.DeleteOption("network", "wan", "password"),
+                UciOp.DeleteOption("network", "wan", "dns")
+            ),
+            dhcpFromPpp.ops
+        )
+
+        val ptp = plan(FeatureChanges.wan("dhcp", "static", "192.0.2.2", "255.255.255.254", "192.0.2.3", "1.1.1.1", "", ""))
+        assertTrue(ptp.ops.isNotEmpty())
+        val hostRoute = plan(FeatureChanges.wan("dhcp", "static", "192.0.2.2", "255.255.255.255", "192.0.2.1", "1.1.1.1", "", ""))
+        assertTrue(hostRoute.ops.isNotEmpty())
+
         val st = plan(FeatureChanges.wan("dhcp", "static", "192.168.31.50", "255.255.255.0", "192.168.31.1", "1.1.1.1 9.9.9.9", "", ""))
-        val op = st.ops.single() as UciOp.Set
+        val op = st.ops.first() as UciOp.Set
         assertEquals("static", op.values["proto"])
         assertEquals("192.168.31.50", op.values["ipaddr"])
         assertEquals(listOf("1.1.1.1", "9.9.9.9"), op.values["dns"])
@@ -53,11 +77,11 @@ class FeatureChangesBatch3Test {
         assertTrue(error(FeatureChanges.wan("dhcp", "carrier-pigeon", "", "", "", "", "", "")).isNotBlank())
 
         val ppp = plan(FeatureChanges.wan("dhcp", "pppoe", "", "", "", "", "isp-user", "isp-secret-9"))
-        assertEquals("isp-secret-9", (ppp.ops.single() as UciOp.Set).values["password"])
+        assertEquals("isp-secret-9", (ppp.ops.first() as UciOp.Set).values["password"])
         assertFalse("ISP password must not be shown", ppp.lines.any { "isp-secret-9" in it.before || "isp-secret-9" in it.after })
         assertTrue(error(FeatureChanges.wan("dhcp", "pppoe", "", "", "", "", "isp-user", "")).contains("password"))
         val keepPw = plan(FeatureChanges.wan("pppoe", "pppoe", "", "", "", "", "isp-user", ""))
-        assertFalse("staying on PPPoE with an empty password keeps the old one", (keepPw.ops.single() as UciOp.Set).values.containsKey("password"))
+        assertFalse("staying on PPPoE with an empty password keeps the old one", (keepPw.ops.first() as UciOp.Set).values.containsKey("password"))
     }
 
     @Test
@@ -98,6 +122,7 @@ class FeatureChangesBatch3Test {
         val bad = Router(wanUpAfter = 99)
         assertEquals(ChangeOutcome.InternetNotBack, SafeChangeRunner(RouterWriter(bad), probeAttempts = 1, probeDelayMs = 0, internetAttempts = 5).run(p))
         assertFalse("never confirm when the internet did not come back", bad.log.contains("uci.confirm"))
+        assertTrue("explicitly roll back when internet did not come back", bad.log.contains("uci.rollback"))
         assertEquals(5, bad.dumps)
     }
 }

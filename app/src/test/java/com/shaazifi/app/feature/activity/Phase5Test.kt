@@ -58,6 +58,9 @@ class Phase5Test {
         cache = DeviceCache.put(cache, "r2", "Office", 200, listOf(CachedDevice("Printer", "10.0.0.9", "AA:BB:CC:00:00:02", false)))
         assertEquals(listOf("Printer"), DeviceCache.search(cache, "10.0.0").map { it.second.name })
         assertEquals(listOf("Laptop"), DeviceCache.search(cache, "aa:bb:cc:00:00:01").map { it.second.name })
+        assertEquals(listOf("Laptop"), DeviceCache.search(cache, "apple") { mac ->
+            if (mac.endsWith("01")) "Apple" else "HP"
+        }.map { it.second.name })
         assertEquals(2, DeviceCache.search(cache, "").size)
         assertEquals(setOf("r2"), DeviceCache.forget(cache, "r1").keys)
         assertEquals(cache, DeviceCache.decode(DeviceCache.encode(cache)))

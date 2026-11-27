@@ -1,28 +1,105 @@
 package com.shaazifi.app.feature.web
 
 import com.shaazifi.app.core.net.AddressGuard
+import com.shaazifi.app.core.net.AddressGuardDns
+import com.shaazifi.app.core.net.SystemAddressGuardDns
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.security.MessageDigest
 
+enum class NavigationDecision {
+    /** Load inside the WebView (matches the router origin and passes AddressGuard). */
+    ALLOW_INTERNAL,
+
+    /** Safe public internet link: open in external browser via ACTION_VIEW (not on redirects). */
+    OPEN_EXTERNAL,
+
+    /** Blocked: dangerous scheme, userinfo spoofing, obfuscated IP, or another private host. */
+    BLOCK
+}
+
 object SecureWebNavigation {
 
-    fun isInternalNavigation(url: String, routerOrigin: String): Boolean {
+    @JvmOverloads
+    fun isInternalNavigation(
+        url: String,
+        routerOrigin: String,
+        dns: AddressGuardDns = SystemAddressGuardDns
+    ): Boolean {
         val targetUrl = url.toHttpUrlOrNull() ?: return false
         val originUrl = routerOrigin.toHttpUrlOrNull() ?: return false
 
         if (targetUrl.scheme != originUrl.scheme) return false
         if (!targetUrl.host.equals(originUrl.host, ignoreCase = true)) return false
         if (targetUrl.port != originUrl.port) return false
+        if (targetUrl.username.isNotEmpty() || targetUrl.password.isNotEmpty()) return false
 
-        return true
+        return AddressGuard.isAllowed(targetUrl.host, dns)
     }
 
-    fun isNavigationalAllowed(url: String, routerOrigin: String): Boolean {
-        val targetUrl = url.toHttpUrlOrNull() ?: return false
-        val host = targetUrl.host
+    /**
+     * True when [url] is allowed to load inside the router WebView (internal to [routerOrigin]
+     * and permitted by [AddressGuard]).
+     */
+    @JvmOverloads
+    fun isNavigationalAllowed(
+        url: String,
+        routerOrigin: String,
+        dns: AddressGuardDns = SystemAddressGuardDns
+    ): Boolean = isInternalNavigation(url, routerOrigin, dns)
 
-        // AddressGuard enforces strict validation (no user@host, strict IP ranges, dotted-quad)
-        return AddressGuard.isAllowed(host)
+    /**
+     * True when [url] is a safe, non-local HTTP(S) link that should open in the system browser
+     * rather than inside the router WebView. Arbitrary private/local hosts, obfuscated IPs,
+     * userinfo-spoofed URLs, and non-HTTP(S) schemes are refused.
+     */
+    @JvmOverloads
+    fun isExternalBrowserUrl(
+        url: String,
+        routerOrigin: String,
+        dns: AddressGuardDns = SystemAddressGuardDns
+    ): Boolean {
+        val targetUrl = url.toHttpUrlOrNull() ?: return false
+        if (targetUrl.username.isNotEmpty() || targetUrl.password.isNotEmpty()) return false
+        if (isInternalNavigation(url, routerOrigin, dns)) return false
+        val host = targetUrl.host
+        if (AddressGuard.isNonCanonicalIp(host)) return false
+        return !AddressGuard.isAllowed(host, dns)
+    }
+
+    /** Decides how WebView navigation to [url] should be handled. */
+    @JvmOverloads
+    fun decideNavigation(
+        url: String,
+        routerOrigin: String,
+        isRedirect: Boolean = false,
+        dns: AddressGuardDns = SystemAddressGuardDns
+    ): NavigationDecision {
+        if (isNavigationalAllowed(url, routerOrigin, dns)) {
+            return NavigationDecision.ALLOW_INTERNAL
+        }
+        if (!isRedirect && isExternalBrowserUrl(url, routerOrigin, dns)) {
+            return NavigationDecision.OPEN_EXTERNAL
+        }
+        return NavigationDecision.BLOCK
+    }
+
+    /**
+     * Enforces [AddressGuard] on WebView subresources (<script>, fetch, <img>, etc.).
+     * In-memory `data:`, `blob:`, and `about:` resources are permitted; network schemes
+     * must be valid HTTP(S) URLs without userinfo whose host passes [AddressGuard.isAllowed].
+     */
+    @JvmOverloads
+    fun isSubresourceAllowed(
+        url: String,
+        routerOrigin: String,
+        dns: AddressGuardDns = SystemAddressGuardDns
+    ): Boolean {
+        val trimmed = url.trim()
+        val scheme = trimmed.substringBefore(':', "").lowercase()
+        if (scheme == "data" || scheme == "blob" || scheme == "about") return true
+        val targetUrl = trimmed.toHttpUrlOrNull() ?: return false
+        if (targetUrl.username.isNotEmpty() || targetUrl.password.isNotEmpty()) return false
+        return AddressGuard.isAllowed(targetUrl.host, dns)
     }
 
     private val TOKEN_REGEX = Regex("^[0-9a-f]{32}$")

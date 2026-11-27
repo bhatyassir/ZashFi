@@ -75,17 +75,19 @@ internal fun DevicesScreen(
     listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState()
 ) {
     var sortOpen by remember { mutableStateOf(false) }
+    val makers = rememberMakers()
     LoadStateContent(holder, onSignInAgain) { list, _ ->
         val c = SfTheme.colors
         val base = list.devices
         val matching = base.filter { device ->
+            val maker = Makers.label(makers, device.mac).orEmpty()
             (when (kind) {
                 "Online" -> device.online
                 "Wi-Fi" -> device.connection.isWifi
                 "Wired" -> device.connection == Connection.WIRED
                 "All devices" -> true
                 else -> device.network?.key == kind || base.none { it.network?.key == kind }
-            }) && listOf(device.name, device.ip, device.mac, device.connection.label, device.network?.label.orEmpty())
+            }) && listOf(device.name, device.ip, device.mac, device.connection.label, device.network?.label.orEmpty(), maker)
                 .any { it.contains(filter.trim(), true) }
         }
         val shown = when (sort) {
@@ -159,11 +161,29 @@ internal fun DevicesScreen(
                         if (!collapsed) SfList {
                             devices.forEachIndexed { i, d ->
                                 if (i > 0) SfDivider()
-                                SfListRow(d.name, subtitle = listOf(d.ip.takeIf { it != d.name }.orEmpty(), d.connection.label)
-                                    .filter(String::isNotBlank).joinToString(" · "),
-                                    icon = DeviceKind.guess(d.name, null).icon(),
-                                    hue = if (d.connection == Connection.WIRED) SfHue.VIOLET else SfHue.BLUE,
-                                    onClick = { onOpenDevice(d) }, trailing = { DeviceRate(d, base, liveTraffic) })
+                                val maker = Makers.label(makers, d.mac)
+                                val randomized = Makers.isRandomized(d.mac)
+                                val deviceKind = DeviceKind.guess(d.name, maker)
+                                SfListRow(
+                                    title = d.name,
+                                    subtitle = listOfNotNull(
+                                        d.ip.takeIf { it.isNotBlank() && it != d.name },
+                                        d.connection.label,
+                                        maker?.takeUnless { randomized }
+                                    ).joinToString(" · "),
+                                    icon = deviceKind.icon(),
+                                    hue = deviceKind.hue(),
+                                    onClick = { onOpenDevice(d) },
+                                    trailing = {
+                                        Column(
+                                            horizontalAlignment = Alignment.End,
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            DeviceRate(d, base, liveTraffic)
+                                            if (randomized) Pill("Private MAC", PillTone.Off)
+                                        }
+                                    }
+                                )
                             }
                         }
                     }
@@ -244,8 +264,11 @@ internal fun DeviceDetailsAndActions(
     onParental: () -> Unit
 ) {
     val c = SfTheme.colors
-    var editing by remember(d) { mutableStateOf<DeviceEdit?>(null) }
-    var error by remember(d) { mutableStateOf<String?>(null) }
+    val makers = rememberMakers()
+    val maker = Makers.label(makers, d.mac)
+    val randomized = Makers.isRandomized(d.mac)
+    var editing by remember(d.mac) { mutableStateOf<DeviceEdit?>(null) }
+    var error by remember(d.mac) { mutableStateOf<String?>(null) }
     Column(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -258,8 +281,18 @@ internal fun DeviceDetailsAndActions(
             SfListRow(title = "IP address", icon = SfIcons.Globe, hue = SfHue.BLUE,
                 trailing = { Text(d.ip.ifBlank { "Unavailable" }, style = SfText.mono, color = c.muted) })
             SfDivider()
-            SfListRow(title = "MAC address", icon = SfIcons.Devices, hue = SfHue.VIOLET,
-                trailing = { Text(d.mac, style = SfText.mono, color = c.muted, softWrap = true) })
+            SfListRow(
+                title = "MAC address",
+                subtitle = if (randomized) "Randomized (private) address" else maker,
+                icon = SfIcons.Devices,
+                hue = SfHue.VIOLET,
+                trailing = {
+                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(d.mac, style = SfText.mono, color = c.muted, softWrap = true)
+                        if (randomized) Pill("Private MAC", PillTone.Warn)
+                    }
+                }
+            )
             d.fixedIp?.let {
                 SfDivider()
                 SfListRow(title = "Fixed address", subtitle = it, icon = SfIcons.Pin, hue = SfHue.VIOLET)
@@ -312,7 +345,7 @@ private fun EditDialog(
     onSave: (String) -> Unit,
     onRemove: (() -> Unit)? = null
 ) {
-    var value by remember(initial) { mutableStateOf(initial) }
+    var value by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },

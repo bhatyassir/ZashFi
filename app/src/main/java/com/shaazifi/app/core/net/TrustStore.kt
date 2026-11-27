@@ -1,5 +1,11 @@
 package com.shaazifi.app.core.net
 
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -7,7 +13,6 @@ import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.HostnameVerifier
-import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLPeerUnverifiedException
@@ -15,6 +20,43 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509ExtendedTrustManager
 import javax.net.ssl.X509TrustManager
+
+interface PinStore {
+    fun loadAll(): Map<String, String>
+    fun save(key: String, fingerprint: String)
+    fun remove(key: String)
+}
+
+class DataStorePinStore(private val dataStore: DataStore<Preferences>) : PinStore {
+    private val prefix = "tls_pin_"
+
+    override fun loadAll(): Map<String, String> = runBlocking {
+        val prefs = dataStore.data.first()
+        buildMap {
+            prefs.asMap().forEach { (k, v) ->
+                if (k.name.startsWith(prefix) && v is String && v.isNotBlank()) {
+                    put(k.name.removePrefix(prefix), v)
+                }
+            }
+        }
+    }
+
+    override fun save(key: String, fingerprint: String) {
+        runBlocking {
+            dataStore.edit { prefs ->
+                prefs[stringPreferencesKey("$prefix$key")] = fingerprint
+            }
+        }
+    }
+
+    override fun remove(key: String) {
+        runBlocking {
+            dataStore.edit { prefs ->
+                prefs.remove(stringPreferencesKey("$prefix$key"))
+            }
+        }
+    }
+}
 
 /**
  * Exception thrown when a server presents a certificate that does not match the
@@ -46,31 +88,51 @@ class UntrustedCertificateException(
  * TrustStore manages Trust-On-First-Use (TOFU) certificate pinning for self-signed
  * router certificates.
  */
-class TrustStore {
+class TrustStore(private val pinStore: PinStore? = null) {
 
     // Maps "host:port" or "host" -> uppercase SHA-256 fingerprint ("XX:XX:XX:...")
-    private val pins = ConcurrentHashMap<String, String>()
+    private val pins = ConcurrentHashMap<String, String>().apply {
+        pinStore?.loadAll()?.forEach { (k, v) -> put(k, v) }
+    }
     private val lastObservedFingerprints = ConcurrentHashMap<String, String>()
 
     fun pin(hostOrKey: String, fingerprint: String) {
-        pins[normalizeKey(hostOrKey)] = fingerprint.trim().uppercase()
+        val fp = fingerprint.trim().uppercase()
+        if (fp == "HTTP_NO_PIN" || fp.isEmpty()) return
+        val key = normalizeKey(hostOrKey)
+        pins[key] = fp
+        pinStore?.save(key, fp)
     }
 
     fun getPinned(hostOrKey: String): String? {
-        return pins[normalizeKey(hostOrKey)]
+        val key = normalizeKey(hostOrKey)
+        return pins[key] ?: pins[hostOnly(key)]
     }
 
     fun getObserved(hostOrKey: String): String? {
         val key = normalizeKey(hostOrKey)
-        return lastObservedFingerprints[key] ?: lastObservedFingerprints[key.substringBefore(":")]
+        return lastObservedFingerprints[key] ?: lastObservedFingerprints[hostOnly(key)]
     }
 
     fun clearPin(hostOrKey: String) {
-        pins.remove(normalizeKey(hostOrKey))
+        val key = normalizeKey(hostOrKey)
+        pins.remove(key)
+        pinStore?.remove(key)
     }
 
     private fun normalizeKey(key: String): String {
         return key.trim().lowercase().removePrefix("https://").removePrefix("http://").substringBefore("/")
+    }
+
+    private fun hostOnly(normalized: String): String {
+        if (normalized.startsWith("[")) {
+            return normalized.substringAfter("[").substringBefore("]")
+        }
+        return if (normalized.count { it == ':' } == 1) {
+            normalized.substringBefore(":")
+        } else {
+            normalized
+        }
     }
 
     val trustManager: X509TrustManager = object : X509ExtendedTrustManager() {
@@ -113,9 +175,11 @@ class TrustStore {
                 }
             } else null
 
-            val host = peerHost ?: socket.inetAddress?.hostName ?: socket.inetAddress?.hostAddress
+            val host = peerHost ?: socket.inetAddress?.hostAddress
             val port = socket.port
-            return if (host != null && port > 0) "$host:$port" else host
+            if (host == null) return null
+            val formattedHost = if (host.contains(":") && !host.startsWith("[")) "[$host]" else host
+            return if (port > 0) "$formattedHost:$port" else formattedHost
         }
 
         private fun validateChain(chain: Array<out X509Certificate>?, hostHint: String?) {
@@ -129,38 +193,20 @@ class TrustStore {
                 lastObservedFingerprints[normalizeKey(hostHint)] = actualFp
             }
 
-            // 1. If we have a specific host hint, check for an exact host or host:port pin
+            // 1. Check for an exact host:port or host pin (never fall back to another host's pin)
             if (hostHint != null) {
                 val normalized = normalizeKey(hostHint)
-                val hostOnly = normalized.substringBefore(":")
-                val expectedFp = pins[normalized] ?: pins[hostOnly]
+                val host = hostOnly(normalized)
+                val expectedFp = pins[normalized] ?: pins[host] ?: pins["[$host]"]
                 if (expectedFp != null) {
                     if (!actualFp.equals(expectedFp, ignoreCase = true)) {
                         throw CertificateChangedException(hostHint, expectedFp, actualFp)
                     }
-                    return // Matching pin verified!
-                }
-            }
-
-            // 2. Fallback: if pins exist in this store
-            if (pins.isNotEmpty()) {
-                // If any pin matches the actual certificate fingerprint, accept
-                if (pins.values.any { it.equals(actualFp, ignoreCase = true) }) {
                     return
                 }
-
-                // If pins exist and NONE match, trigger a hard stop
-                val expectedFp = if (hostHint != null) {
-                    val normalized = normalizeKey(hostHint)
-                    pins[normalized] ?: pins[normalized.substringBefore(":")] ?: pins.values.first()
-                } else {
-                    pins.values.first()
-                }
-                throw CertificateChangedException(hostHint ?: "router", expectedFp, actualFp)
             }
 
-            // 3. No pin exists for this host or store is empty:
-            // Connection is refused during TLS handshake until user approves the fingerprint.
+            // 2. No pin exists for this host: refuse until user explicitly approves (TOFU)
             throw UntrustedCertificateException(hostHint ?: "unknown", actualFp, serverCert)
         }
     }
@@ -190,21 +236,16 @@ class TrustStore {
 
                 // 1. Check if pinned for this specific host or host:port
                 val normalized = normalizeKey(hostname)
-                val hostOnly = normalized.substringBefore(":")
-                val expectedFp = pins[normalized] ?: pins[hostOnly]
+                val host = hostOnly(normalized)
+                val portSuffix = if (session.peerPort > 0) ":${session.peerPort}" else ""
+                val hostWithPort = if (host.contains(":")) "[$host]$portSuffix" else "$host$portSuffix"
+                val expectedFp = pins[hostWithPort] ?: pins[normalized] ?: pins[host]
 
                 if (expectedFp != null) {
                     return@HostnameVerifier actualFp.equals(expectedFp, ignoreCase = true)
                 }
 
-                // 2. If pins exist, check if this certificate matches any pinned router
-                if (pins.isNotEmpty()) {
-                    if (pins.values.any { it.equals(actualFp, ignoreCase = true) }) {
-                        return@HostnameVerifier true
-                    }
-                }
-
-                // 3. Never trust-all: unpinned certificates are refused
+                // 2. Never trust-all or cross-host match: unpinned certificates are refused
                 false
             } catch (_: Exception) {
                 false

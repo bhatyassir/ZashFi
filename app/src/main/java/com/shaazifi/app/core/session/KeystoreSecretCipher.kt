@@ -5,7 +5,12 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.UserNotAuthenticatedException
+import java.security.GeneralSecurityException
+import java.security.InvalidAlgorithmParameterException
+import java.security.InvalidKeyException
 import java.security.KeyStore
+import java.security.KeyStoreException
+import java.security.UnrecoverableKeyException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -26,7 +31,18 @@ class KeystoreSecretCipher(
     private val requireUserAuth: Boolean = true
 ) : SecretCipher {
 
-    override fun encrypt(plain: ByteArray, aad: ByteArray): ByteArray = guarded {
+    override fun encrypt(plain: ByteArray, aad: ByteArray): ByteArray = try {
+        try {
+            encryptOnce(plain, aad)
+        } catch (_: SecretUnavailableException.KeyGone) {
+            // Recreate once if an existing Keystore key was corrupted or invalidated.
+            encryptOnce(plain, aad)
+        }
+    } finally {
+        plain.fill(0)
+    }
+
+    private fun encryptOnce(plain: ByteArray, aad: ByteArray): ByteArray = guarded {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key(create = true))
         cipher.updateAAD(aad)
@@ -56,6 +72,21 @@ class KeystoreSecretCipher(
     } catch (_: UserNotAuthenticatedException) {
         throw SecretUnavailableException.NeedsUnlock()
     } catch (_: KeyPermanentlyInvalidatedException) {
+        deleteKey()
+        throw SecretUnavailableException.KeyGone()
+    } catch (_: InvalidKeyException) {
+        deleteKey()
+        throw SecretUnavailableException.KeyGone()
+    } catch (_: InvalidAlgorithmParameterException) {
+        deleteKey()
+        throw SecretUnavailableException.KeyGone()
+    } catch (_: KeyStoreException) {
+        deleteKey()
+        throw SecretUnavailableException.KeyGone()
+    } catch (_: UnrecoverableKeyException) {
+        deleteKey()
+        throw SecretUnavailableException.KeyGone()
+    } catch (_: GeneralSecurityException) {
         deleteKey()
         throw SecretUnavailableException.KeyGone()
     }

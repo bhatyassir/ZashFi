@@ -1,5 +1,6 @@
 package com.shaazifi.app.core.adguard
 
+import com.shaazifi.app.core.adguard.AdGuardHttp.await
 import com.shaazifi.app.feature.adguard.AdGuardDashboard
 import com.shaazifi.app.feature.adguard.AdGuardFilteringStatus
 import com.shaazifi.app.feature.adguard.AdGuardLogDevice
@@ -7,24 +8,18 @@ import com.shaazifi.app.feature.adguard.AdGuardParsers
 import com.shaazifi.app.feature.adguard.AdGuardQueryLog
 import com.shaazifi.app.feature.adguard.AdGuardQueryLogSettings
 import com.shaazifi.app.feature.adguard.AdGuardSafeSearchStatus
-import com.shaazifi.app.feature.adguard.AdGuardStats
 import com.shaazifi.app.feature.adguard.AdGuardStatsConfig
-import com.shaazifi.app.feature.adguard.AdGuardStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.Credentials
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okio.Buffer
-import java.io.IOException
 
 /**
  * Diagnostic result of probing an AdGuard Home endpoint.
@@ -46,11 +41,11 @@ data class AdGuardProbeResult(
  * AdGuardClient handles REST API calls to an AdGuard Home instance.
  *
  * Security Constraints:
- * 1. An unauthenticated probe of GET /control/status is ALWAYS performed before sending Basic Auth.
+ * 1. An unauthenticated probe of GET /control/status is performed before sending Basic Auth (unless [alreadyProbed]).
  * 2. Credentials are never sent to unverified endpoints (e.g. router web server on port 80).
  * 3. Network calls pass through AddressGuard (private/Tailscale addresses only).
  * 4. Passwords are held in memory only for the request and never logged.
- * 5. State-changing empty-body POSTs (safebrowsing) omit Content-Type header [UNVERIFIED: no source was read].
+ * 5. State-changing empty-body POSTs (safebrowsing/parental) omit Content-Type header.
  */
 class AdGuardClient(
     private val client: OkHttpClient
@@ -63,14 +58,15 @@ class AdGuardClient(
      * Never sends credentials in this check.
      */
     suspend fun probeEndpointDetailed(baseUrl: String): AdGuardProbeResult = withContext(Dispatchers.IO) {
-        val parsed = baseUrl.toHttpUrlOrNull()
+        val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+        val parsed = normalizedBase.toHttpUrlOrNull()
         val targetHostPort = if (parsed != null) {
             "${parsed.host}:${parsed.port}"
         } else {
-            baseUrl.removePrefix("http://").removePrefix("https://").substringBefore("/")
+            normalizedBase.removePrefix("http://").removePrefix("https://").substringBefore("/")
         }
 
-        val url = "$baseUrl/control/status".toHttpUrlOrNull()
+        val url = "$normalizedBase/control/status".toHttpUrlOrNull()
         if (url == null) {
             return@withContext AdGuardProbeResult(
                 isAdGuard = false,
@@ -89,12 +85,12 @@ class AdGuardClient(
             .build()
 
         try {
-            client.newCall(request).execute().use { response ->
+            client.newCall(request).await().use { response ->
                 when (response.code) {
                     200 -> {
                         val body = response.body.string()
                         val isJsonAdGuard = body.contains("\"version\"") &&
-                                (body.contains("\"protection_enabled\"") || body.contains("\"dns_addresses\""))
+                            (body.contains("\"protection_enabled\"") || body.contains("\"dns_addresses\""))
                         AdGuardProbeResult(
                             isAdGuard = isJsonAdGuard,
                             diagnostic = AdGuardProbeDiagnostic(
@@ -105,17 +101,16 @@ class AdGuardClient(
                         )
                     }
                     401 -> {
-                        // AdGuard Home answers an unauthenticated /control/* request with a bare 401:
-                        // no WWW-Authenticate header, no body.
-                        // Source: AdguardTeam/AdGuardHome master 5a6053ab47f1, internal/home/authhttp.go,
-                        // authMiddlewareDefault.Wrap. Read 2026-11-16.
-                        // A 401 alone cannot prove the server is AdGuard, so it means "present, sign-in needed";
-                        // the signed-in /control/status reply is still parsed and must look like AdGuard.
+                        // AdGuard Home answers an unauthenticated /control/* request with a bare 401
+                        // (no WWW-Authenticate header, empty body) or Basic realm="AdGuard Home".
+                        // Reject 401s that carry non-AdGuard indicators (non-AdGuard WWW-Authenticate
+                        // realm, HTML/XML Content-Type, known router Server headers, or non-JSON text).
+                        val isPlausibleAdGuard = isPlausibleAdGuard401(response)
                         AdGuardProbeResult(
-                            isAdGuard = true,
+                            isAdGuard = isPlausibleAdGuard,
                             diagnostic = AdGuardProbeDiagnostic(
                                 targetHostPort = targetHostPort,
-                                httpCodeOrException = "HTTP 401",
+                                httpCodeOrException = if (isPlausibleAdGuard) "HTTP 401" else "HTTP 401 (Non-AdGuard)",
                                 socketConnected = true
                             )
                         )
@@ -132,10 +127,12 @@ class AdGuardClient(
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val socketConnected = e !is java.net.ConnectException &&
-                    e !is java.net.UnknownHostException &&
-                    !e.message.orEmpty().contains("failed to connect", ignoreCase = true)
+                e !is java.net.UnknownHostException &&
+                !e.message.orEmpty().contains("failed to connect", ignoreCase = true)
             AdGuardProbeResult(
                 isAdGuard = false,
                 diagnostic = AdGuardProbeDiagnostic(
@@ -147,6 +144,32 @@ class AdGuardClient(
         }
     }
 
+    private fun isPlausibleAdGuard401(response: Response): Boolean {
+        val wwwAuth = response.header("WWW-Authenticate")?.trim()
+        if (!wwwAuth.isNullOrEmpty() && !wwwAuth.contains("adguard", ignoreCase = true)) {
+            return false
+        }
+
+        val serverHeader = response.header("Server")?.trim().orEmpty()
+        if (NON_ADGUARD_SERVERS.any { serverHeader.contains(it, ignoreCase = true) }) {
+            return false
+        }
+
+        val contentType = response.header("Content-Type")?.trim().orEmpty()
+        if (contentType.contains("html", ignoreCase = true) || contentType.contains("xml", ignoreCase = true)) {
+            return false
+        }
+
+        val bodyPreview = runCatching { response.peekBody(1024).string().trim() }.getOrDefault("")
+        if (bodyPreview.isEmpty()) {
+            return true
+        }
+        if (bodyPreview.startsWith("<") || !bodyPreview.startsWith("{") || !bodyPreview.endsWith("}")) {
+            return false
+        }
+        return true
+    }
+
     /**
      * Probes the endpoint unauthenticated to verify it is recognisably AdGuard Home.
      * Never sends credentials in this check.
@@ -156,7 +179,7 @@ class AdGuardClient(
     private suspend fun executeGet(
         urlStr: String,
         authHeader: String
-    ): String = suspendCancellableCoroutine { continuation ->
+    ): String {
         val url = urlStr.toHttpUrlOrNull() ?: throw AdGuardError.HttpError(400, "Malformed URL")
         val request = Request.Builder()
             .url(url)
@@ -164,96 +187,84 @@ class AdGuardClient(
             .header("Authorization", authHeader)
             .header("Accept", "application/json")
             .build()
+        return AdGuardHttp.execute(client, request)
+    }
 
-        val call = client.newCall(request)
-        continuation.invokeOnCancellation { call.cancel() }
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                continuation.resumeWith(Result.failure(AdGuardError.Unreachable(cause = e)))
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                val result = runCatching {
-                    response.use {
-                        when (response.code) {
-                            200 -> response.body.string()
-                            401 -> throw AdGuardError.Unauthorized()
-                            429 -> throw AdGuardError.RateLimited(
-                                retryAfterSeconds = response.header("Retry-After")?.trim()?.toIntOrNull()
-                            )
-                            else -> throw AdGuardError.HttpError(response.code, response.message)
-                        }
-                    }
-                }
-                continuation.resumeWith(result.recoverCatching { error ->
-                    throw if (error is IOException) AdGuardError.Unreachable(cause = error) else error
-                })
-            }
-        })
+    private suspend inline fun <T> optionalDashboardCall(
+        fallback: T,
+        block: () -> T
+    ): T = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: AdGuardError.Unauthorized) {
+        throw e
+    } catch (e: AdGuardError.RateLimited) {
+        throw e
+    } catch (_: Exception) {
+        fallback
     }
 
     suspend fun loadDashboard(
         baseUrl: String,
         username: String,
-        password: String
+        password: String,
+        alreadyProbed: Boolean = false
     ): AdGuardDashboard = withContext(Dispatchers.IO) {
-        // Enforce unauthenticated discovery gate
-        if (!probeEndpoint(baseUrl)) {
-            throw AdGuardError.NotAdGuardHome("Endpoint $baseUrl is not recognisably AdGuard Home")
+        val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+
+        // Enforce unauthenticated discovery gate unless caller already probed this endpoint
+        if (!alreadyProbed && !probeEndpoint(normalizedBase)) {
+            throw AdGuardError.NotAdGuardHome("Endpoint $normalizedBase is not recognisably AdGuard Home")
         }
 
-        val authHeader = Credentials.basic(username, password)
-        val isCleartext = baseUrl.startsWith("http://")
+        val authHeader = AdGuardHttp.basicAuth(username, password)
+        val isCleartext = AdGuardHttp.isCleartextHttp(normalizedBase)
 
-        val statusStr = executeGet("$baseUrl/control/status", authHeader)
-        val status = AdGuardParsers.parseStatus(statusStr)
+        // Verify credentials with /control/status first before fanning out parallel GETs
+        val status = AdGuardParsers.parseStatus(executeGet("$normalizedBase/control/status", authHeader))
 
-        val statsStr = executeGet("$baseUrl/control/stats", authHeader)
-        val stats = AdGuardParsers.parseStats(statsStr)
+        coroutineScope {
+            val statsDeferred = async {
+                AdGuardParsers.parseStats(executeGet("$normalizedBase/control/stats", authHeader))
+            }
+            val statsConfigDeferred = async {
+                optionalDashboardCall(AdGuardStatsConfig(intervalKnown = false)) {
+                    AdGuardParsers.parseStatsConfig(executeGet("$normalizedBase/control/stats/config", authHeader))
+                }
+            }
+            val filteringDeferred = async {
+                optionalDashboardCall(AdGuardFilteringStatus()) {
+                    AdGuardParsers.parseFilteringStatus(executeGet("$normalizedBase/control/filtering/status", authHeader))
+                }
+            }
+            val safeSearchDeferred = async {
+                optionalDashboardCall(AdGuardSafeSearchStatus()) {
+                    AdGuardParsers.parseSafeSearchStatus(executeGet("$normalizedBase/control/safesearch/status", authHeader))
+                }
+            }
+            val safeBrowsingDeferred = async {
+                optionalDashboardCall<Boolean?>(null) {
+                    AdGuardParsers.parseEnabledFlag(executeGet("$normalizedBase/control/safebrowsing/status", authHeader))
+                }
+            }
+            val parentalDeferred = async {
+                optionalDashboardCall<Boolean?>(null) {
+                    AdGuardParsers.parseEnabledFlag(executeGet("$normalizedBase/control/parental/status", authHeader))
+                }
+            }
 
-        val statsConfig = try {
-            val configStr = executeGet("$baseUrl/control/stats/config", authHeader)
-            AdGuardParsers.parseStatsConfig(configStr)
-        } catch (_: Exception) {
-            AdGuardStatsConfig(intervalKnown = false)
+            AdGuardDashboard(
+                status = status,
+                stats = statsDeferred.await(),
+                statsConfig = statsConfigDeferred.await(),
+                filtering = filteringDeferred.await(),
+                safeSearch = safeSearchDeferred.await(),
+                isCleartextHttp = isCleartext,
+                safeBrowsingEnabled = safeBrowsingDeferred.await(),
+                parentalEnabled = parentalDeferred.await()
+            )
         }
-
-        val filtering = try {
-            val filteringStr = executeGet("$baseUrl/control/filtering/status", authHeader)
-            AdGuardParsers.parseFilteringStatus(filteringStr)
-        } catch (_: Exception) {
-            AdGuardFilteringStatus()
-        }
-
-        val safeSearch = try {
-            val safeSearchStr = executeGet("$baseUrl/control/safesearch/status", authHeader)
-            AdGuardParsers.parseSafeSearchStatus(safeSearchStr)
-        } catch (_: Exception) {
-            AdGuardSafeSearchStatus()
-        }
-
-        // Read-only status calls. A failure leaves the value unknown (null), never guessed.
-        val safeBrowsingEnabled = try {
-            AdGuardParsers.parseEnabledFlag(executeGet("$baseUrl/control/safebrowsing/status", authHeader))
-        } catch (_: Exception) {
-            null
-        }
-        val parentalEnabled = try {
-            AdGuardParsers.parseEnabledFlag(executeGet("$baseUrl/control/parental/status", authHeader))
-        } catch (_: Exception) {
-            null
-        }
-
-        AdGuardDashboard(
-            status = status,
-            stats = stats,
-            statsConfig = statsConfig,
-            filtering = filtering,
-            safeSearch = safeSearch,
-            isCleartextHttp = isCleartext,
-            safeBrowsingEnabled = safeBrowsingEnabled,
-            parentalEnabled = parentalEnabled
-        )
     }
 
     suspend fun loadQueryLog(
@@ -267,8 +278,9 @@ class AdGuardClient(
         /** AdGuard Home internal/querylog/deprecated.go values; "all" or null means no filter. */
         responseStatus: String? = null
     ): AdGuardQueryLog = withContext(Dispatchers.IO) {
-        val authHeader = Credentials.basic(username, password)
-        val urlBuilder = "$baseUrl/control/querylog".toHttpUrlOrNull()?.newBuilder()
+        val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+        val authHeader = AdGuardHttp.basicAuth(username, password)
+        val urlBuilder = "$normalizedBase/control/querylog".toHttpUrlOrNull()?.newBuilder()
             ?: throw AdGuardError.HttpError(400, "Malformed URL")
 
         urlBuilder.addQueryParameter("limit", limit.toString())
@@ -289,12 +301,26 @@ class AdGuardClient(
 
     suspend fun loadQueryLogSettings(baseUrl: String, username: String, password: String): AdGuardQueryLogSettings =
         withContext(Dispatchers.IO) {
-            AdGuardParsers.parseQueryLogSettings(executeGet("$baseUrl/control/querylog/config", Credentials.basic(username, password)))
+            val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+            val authHeader = AdGuardHttp.basicAuth(username, password)
+            val jsonStr = try {
+                executeGet("$normalizedBase/control/querylog/config", authHeader)
+            } catch (e: AdGuardError.HttpError) {
+                // Legacy AdGuard Home v0.107.0 - v0.107.29 fallback
+                if (e.statusCode == 404 || e.statusCode == 405) {
+                    executeGet("$normalizedBase/control/querylog_info", authHeader)
+                } else {
+                    throw e
+                }
+            }
+            AdGuardParsers.parseQueryLogSettings(jsonStr)
         }
 
     suspend fun loadQueryLogClients(baseUrl: String, username: String, password: String): List<AdGuardLogDevice> =
         withContext(Dispatchers.IO) {
-            AdGuardParsers.parseQueryLogClients(executeGet("$baseUrl/control/clients", Credentials.basic(username, password)))
+            val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+            val authHeader = AdGuardHttp.basicAuth(username, password)
+            AdGuardParsers.parseQueryLogClients(executeGet("$normalizedBase/control/clients", authHeader))
         }
 
     suspend fun setProtection(
@@ -304,8 +330,9 @@ class AdGuardClient(
         enabled: Boolean,
         durationMs: Long? = null
     ): Unit = withContext(Dispatchers.IO) {
-        val authHeader = Credentials.basic(username, password)
-        val url = "$baseUrl/control/protection".toHttpUrlOrNull()
+        val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+        val authHeader = AdGuardHttp.basicAuth(username, password)
+        val url = "$normalizedBase/control/protection".toHttpUrlOrNull()
             ?: throw AdGuardError.HttpError(400, "Malformed URL")
 
         val payload = if (durationMs != null && !enabled) {
@@ -314,15 +341,32 @@ class AdGuardClient(
             """{"enabled":$enabled}"""
         }
 
-        val body = payload.toRequestBody(jsonMediaType)
         val request = Request.Builder()
             .url(url)
-            .post(body)
+            .post(payload.toRequestBody(jsonMediaType))
             .header("Authorization", authHeader)
             .header("Accept", "application/json")
             .build()
 
-        executeWriteRequest(request)
+        try {
+            AdGuardHttp.execute(client, request)
+        } catch (e: AdGuardError.HttpError) {
+            // Legacy AdGuard Home v0.107.0 - v0.107.29 fallback
+            if (e.statusCode == 404 || e.statusCode == 405) {
+                val legacyUrl = "$normalizedBase/control/dns_config".toHttpUrlOrNull()
+                    ?: throw AdGuardError.HttpError(400, "Malformed URL")
+                val legacyPayload = """{"protection_enabled":$enabled}"""
+                val legacyRequest = Request.Builder()
+                    .url(legacyUrl)
+                    .post(legacyPayload.toRequestBody(jsonMediaType))
+                    .header("Authorization", authHeader)
+                    .header("Accept", "application/json")
+                    .build()
+                AdGuardHttp.execute(client, legacyRequest)
+            } else {
+                throw e
+            }
+        }
     }
 
     suspend fun setSafeBrowsing(
@@ -330,45 +374,39 @@ class AdGuardClient(
         username: String,
         password: String,
         enabled: Boolean
-    ): Unit = withContext(Dispatchers.IO) {
-        val authHeader = Credentials.basic(username, password)
-        val endpoint = if (enabled) "enable" else "disable"
-        val url = "$baseUrl/control/safebrowsing/$endpoint".toHttpUrlOrNull()
-            ?: throw AdGuardError.HttpError(400, "Malformed URL")
+    ): Unit = setToggleFeature(baseUrl, username, password, "safebrowsing", enabled)
 
-        // Note: The empty-body Content-Type rule is [UNVERIFIED] (no source was read). We omit Content-Type for empty bodies.
-        val emptyBody = object : RequestBody() {
-            override fun contentType() = null // No Content-Type header
-            override fun writeTo(sink: okio.BufferedSink) {}
-        }
+    suspend fun setParental(
+        baseUrl: String,
+        username: String,
+        password: String,
+        enabled: Boolean
+    ): Unit = setToggleFeature(baseUrl, username, password, "parental", enabled)
+
+    private suspend fun setToggleFeature(
+        baseUrl: String,
+        username: String,
+        password: String,
+        feature: String,
+        enabled: Boolean
+    ): Unit = withContext(Dispatchers.IO) {
+        val normalizedBase = AdGuardHttp.normalizeBaseUrl(baseUrl)
+        val authHeader = AdGuardHttp.basicAuth(username, password)
+        val endpoint = if (enabled) "enable" else "disable"
+        val url = "$normalizedBase/control/$feature/$endpoint".toHttpUrlOrNull()
+            ?: throw AdGuardError.HttpError(400, "Malformed URL")
 
         val request = Request.Builder()
             .url(url)
-            .post(emptyBody)
+            .post(AdGuardHttp.emptyBodyWithoutContentType())
             .header("Authorization", authHeader)
             .header("Accept", "application/json")
             .build()
 
-        executeWriteRequest(request)
+        AdGuardHttp.execute(client, request)
     }
 
-    private fun executeWriteRequest(request: Request) {
-        try {
-            client.newCall(request).execute().use { response ->
-                when (response.code) {
-                    200 -> Unit
-                    401 -> throw AdGuardError.Unauthorized()
-                    429 -> {
-                        val retryAfter = response.header("Retry-After")?.trim()?.toIntOrNull()
-                        throw AdGuardError.RateLimited(retryAfterSeconds = retryAfter)
-                    }
-                    else -> throw AdGuardError.HttpError(response.code, response.message)
-                }
-            }
-        } catch (e: AdGuardError) {
-            throw e
-        } catch (e: Exception) {
-            throw AdGuardError.Unreachable("Could not execute write request to AdGuard Home", e)
-        }
+    private companion object {
+        val NON_ADGUARD_SERVERS = listOf("uhttpd", "boa", "luci", "lighttpd", "mikrotik")
     }
 }

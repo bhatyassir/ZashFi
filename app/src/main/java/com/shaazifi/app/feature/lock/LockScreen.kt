@@ -1,6 +1,5 @@
 package com.shaazifi.app.feature.lock
 
-import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
 import com.shaazifi.app.R
 import com.shaazifi.app.core.session.AppLock
 import com.shaazifi.app.core.session.BiometricGate
@@ -48,7 +46,7 @@ fun LockScreen(lock: AppLock, modifier: Modifier = Modifier) {
     var busy by remember { mutableStateOf(false) }
 
     fun unlock() {
-        val activity = context as? FragmentActivity ?: return
+        val activity = BiometricGate.findActivity(context) ?: return
         if (busy) return
         busy = true
         scope.launch {
@@ -68,7 +66,7 @@ fun LockScreen(lock: AppLock, modifier: Modifier = Modifier) {
     }
 
     // Back leaves the app instead of reaching the screens underneath.
-    BackHandler { (context as? Activity)?.moveTaskToBack(true) }
+    BackHandler { BiometricGate.findActivity(context)?.moveTaskToBack(true) }
     LaunchedEffect(Unit) { unlock() }
 
     Box(

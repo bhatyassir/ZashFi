@@ -3,7 +3,9 @@ package com.shaazifi.app.feature.router
 import com.shaazifi.app.core.ubus.UbusError
 import com.shaazifi.app.feature.home.UbusCaller
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -119,7 +121,12 @@ class RouterWriter(private val caller: UbusCaller) {
         )
 
         val RULES: Map<String, ConfigRule> = mapOf(
-            "dhcp" to ConfigRule(addTypes = setOf("host"), setOptions = setOf("mac", "ip", "name", "start", "limit", "leasetime"), deleteSections = true),
+            "dhcp" to ConfigRule(
+                addTypes = setOf("host"),
+                setOptions = setOf("mac", "ip", "name", "start", "limit", "leasetime"),
+                deleteSections = true,
+                deleteOptions = setOf("ip")
+            ),
             "firewall" to ConfigRule(
                 addTypes = setOf("rule", "redirect"),
                 // "network": a zone's network list (joining another Wi-Fi network adds wwan to the wan zone).
@@ -129,12 +136,16 @@ class RouterWriter(private val caller: UbusCaller) {
                 deleteSections = true,
                 deleteOptions = setOf("weekdays", "start_time", "stop_time")
             ),
-            // Wi-Fi: on/off, name, password; radio channel, width, country and power (phase 2). New sections:
-            // client links only (mode sta, checked below), deletable; never a new access point.
+            // Wi-Fi: on/off, name, password, security; radio channel, width, country and power (phase 2).
+            // New sections: client links (mode sta) or a narrowly checked guest access point (mode ap),
+            // both validated in isAllowedWrite. The main Wi-Fi sections are never created here.
             "wireless" to ConfigRule(
                 addTypes = setOf("wifi-iface"),
-                setOptions = setOf("disabled", "ssid", "key", "channel", "htmode", "country", "txpower"),
-                addOptions = setOf("device", "mode", "network", "ssid", "encryption", "key"),
+                setOptions = setOf("disabled", "ssid", "key", "encryption", "ieee80211w", "channel", "htmode", "country", "txpower",
+                    // Narrowly validated by WifiExtras plans: WPS/WDS, client isolation, MAC filtering, guest VLAN.
+                    "wps_pushbutton", "wds", "isolate", "macfilter", "maclist", "vlan"),
+                addOptions = setOf("device", "mode", "network", "ssid", "encryption", "ieee80211w", "key"),
+                deleteSections = true,
                 deleteOptions = setOf("txpower")
             ),
             "system" to ConfigRule(setOptions = setOf("hostname", "zonename", "timezone")),
@@ -144,7 +155,10 @@ class RouterWriter(private val caller: UbusCaller) {
             "openvpn" to ConfigRule(setOptions = setOf("enabled")),
             "upnpd" to ConfigRule(setOptions = setOf("enabled", "enable_upnp", "enable_natpmp")),
             "ddns" to ConfigRule(setOptions = setOf("enabled")),
-            "sqm" to ConfigRule(setOptions = setOf("enabled", "download", "upload"))
+            "sqm" to ConfigRule(
+                addTypes = setOf("queue"),
+                setOptions = setOf("enabled", "download", "upload", "interface", "qdisc", "script", "linklayer", "overhead")
+            )
         )
 
         val WRITABLE_CONFIGS: Set<String> get() = RULES.keys
@@ -159,13 +173,18 @@ class RouterWriter(private val caller: UbusCaller) {
             "/etc/init.d/sqm" to listOf("restart"),
             "/etc/init.d/minidlna" to listOf("restart"),
             "/etc/init.d/minidlna" to listOf("stop"),
-            "/etc/init.d/minidlna" to listOf("enable")
+            "/etc/init.d/minidlna" to listOf("enable"),
+            // Owner's LED night-mode script (one-shot command, no UCI apply).
+            "/usr/bin/led-nightmode" to listOf("night"),
+            "/usr/bin/led-nightmode" to listOf("day")
         )
 
         fun isAllowedService(command: String, params: List<String>): Boolean = (command to params) in SERVICES
 
         /** Internet settings that may be changed on the `wan` interface. Never `disabled`, never the LAN. */
         private val WAN_OPTIONS = setOf("proto", "ipaddr", "netmask", "gateway", "dns", "peerdns", "username", "password")
+        /** Options on `network.wan` that may be cleared when changing WAN protocol or clearing DNS. */
+        private val WAN_CLEARABLE_OPTIONS = setOf("ipaddr", "netmask", "gateway", "dns", "username", "password")
 
         /**
          * The network config is limited by section: `wan` internet settings; `wan6` and other
@@ -180,6 +199,29 @@ class RouterWriter(private val caller: UbusCaller) {
         const val ROLLBACK_SECONDS = 120
 
         private val MAC = Regex("^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+        /** UCI section names used by the app (for example `guest_radio0`). */
+        private val SECTION_NAME = Regex("^[A-Za-z0-9_]{1,32}$")
+        private val GUEST_ENCRYPTIONS = setOf("sae-mixed", "psk2", "sae")
+        /** Exactly the options a new guest access point may carry: no router/LAN options. */
+        private val GUEST_ADD_OPTIONS = setOf("device", "mode", "network", "ssid", "key", "encryption")
+
+        fun isValidSectionName(s: String): Boolean = SECTION_NAME.matches(s)
+
+        /**
+         * Narrow exception to the "client links only" rule: a brand-new guest access point.
+         * The main Wi-Fi and the `lan` network are never reachable from this path.
+         */
+        private fun isAllowedGuestAdd(values: JsonObject): Boolean {
+            if (values.keys != GUEST_ADD_OPTIONS) return false
+            fun value(k: String): String? = (values[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val device = value("device") ?: return false
+            val ssid = value("ssid") ?: return false
+            val key = value("key") ?: return false
+            val encryption = value("encryption") ?: return false
+            return value("mode") == "ap" && value("network") == "guest" &&
+                WifiRadio.isRadioName(device) && ssid.isNotBlank() &&
+                key.length in 8..63 && encryption in GUEST_ENCRYPTIONS
+        }
 
         fun isAllowedWrite(ubusObject: String, method: String, args: JsonObject): Boolean {
             fun str(k: String) = (args[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -205,17 +247,36 @@ class RouterWriter(private val caller: UbusCaller) {
                             str("name") == WifiRadio.CLIENT_NETWORK && values.keys == setOf("proto") &&
                             (values["proto"] as? JsonPrimitive)?.content == "dhcp"
                     }
+                    if (str("config") == "wireless" && str("type") == "wifi-iface" &&
+                        (values["mode"] as? JsonPrimitive)?.content == "ap"
+                    ) {
+                        // Guest creation may name its section (guest_<radio>), like the wwan link does.
+                        val nameOk = when (args.keys) {
+                            setOf("config", "type", "values") -> true
+                            setOf("config", "type", "name", "values") -> str("name")?.let { isValidSectionName(it) } == true
+                            else -> false
+                        }
+                        return nameOk && isAllowedGuestAdd(values)
+                    }
                     if (args.keys != setOf("config", "type", "values") || rule == null || str("type") !in rule.addTypes) return false
                     if (str("config") == "wireless" && (values["mode"] as? JsonPrimitive)?.content != "sta") return false
                     return valueKeys != null && (rule.addOptions ?: rule.setOptions).containsAll(valueKeys)
                 }
                 "uci" to "delete" -> {
                     if (args.keys == setOf("config", "type", "match") && str("config") == "network") {
-                        // Phase 4: one static route, matched by both its interface and its target.
+                        // Phase 4: one static route, matched by interface, target, and optional gateway/metric.
                         val match = args["match"] as? JsonObject ?: return false
-                        return str("type") == "route" && match.keys == setOf("interface", "target")
+                        return str("type") == "route" &&
+                            match.keys.containsAll(setOf("interface", "target")) &&
+                            setOf("interface", "target", "gateway", "metric").containsAll(match.keys)
                     }
-                    if (str("config") == "network") return args.keys == setOf("config", "section") && str("section") == WifiRadio.CLIENT_NETWORK
+                    if (str("config") == "network") {
+                        if (args.keys == setOf("config", "section")) return str("section") == WifiRadio.CLIENT_NETWORK
+                        if (args.keys == setOf("config", "section", "option")) {
+                            return str("section") == "wan" && str("option") in WAN_CLEARABLE_OPTIONS
+                        }
+                        return false
+                    }
                     if (args.keys == setOf("config", "type", "match")) {
                         // Only "remove Wi-Fi client links": wireless wifi-iface sections whose mode is sta.
                         val match = args["match"] as? JsonObject ?: return false
@@ -239,6 +300,11 @@ class RouterWriter(private val caller: UbusCaller) {
                 "luci" to "setPassword" -> return args.keys == setOf("username", "password") && str("username") == "root" &&
                     !str("password").isNullOrEmpty()
                 "network.interface" to "dump" -> return args.isEmpty()
+                "file" to "write" -> {
+                    // Only the exact crontab path. Content is restricted by CronSchedule.plan.
+                    return args.keys == setOf("path", "data") && str("path") == "/etc/crontabs/root" &&
+                        (str("data")?.length ?: 0) <= 4096
+                }
                 "file" to "exec" -> {
                     val command = str("command") ?: return false
                     val params = (args["params"] as? JsonArray)?.map { (it as? JsonPrimitive)?.content ?: return false } ?: return false
@@ -289,7 +355,8 @@ class SafeChangeRunner(
     /** About 100 s at 3 s apart: inside the router's 120 s undo timer, with time for the phone to rejoin Wi-Fi. */
     private val longWaitAttempts: Int = 33,
     /** About 60 s at 3 s apart for the internet to come back after a WAN change. */
-    private val internetAttempts: Int = 20
+    private val internetAttempts: Int = 20,
+    private val clockNs: () -> Long = System::nanoTime
 ) {
     suspend fun run(plan: ChangePlan): ChangeOutcome {
         plan.ubusCall?.let { call ->
@@ -328,67 +395,112 @@ class SafeChangeRunner(
                 writer.send("uci", method, args)
             }
         } catch (e: CancellationException) {
+            withContext(NonCancellable) { revert(staged) }
             throw e
         } catch (e: IOException) {
             revert(staged)
             return ChangeOutcome.Failed(describe(e))
         }
 
+        val applyStartNs = clockNs()
+        val rollbackBudgetNs = RouterWriter.ROLLBACK_SECONDS * 1_000_000_000L
         try {
             writer.send("uci", "apply", buildJsonObject {
                 put("rollback", true)
                 put("timeout", RouterWriter.ROLLBACK_SECONDS)
             })
         } catch (e: CancellationException) {
+            withContext(NonCancellable) {
+                rollback()
+                revert(staged)
+            }
             throw e
         } catch (e: IOException) {
             revert(staged)
             return ChangeOutcome.Failed(describe(e))
         }
 
-        // Services that need a nudge after the apply (fw4 rules, miniupnpd, ddns, sqm), as UnTangled does. Best effort.
-        for ((command, params) in plan.services) {
-            try {
-                writer.send("file", "exec", buildJsonObject {
-                    put("command", command)
-                    put("params", buildJsonArray { params.forEach { add(JsonPrimitive(it)) } })
-                })
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: IOException) {
+        // Only keep the change once the app can still reach the router (within the rollback deadline).
+        val maxProbes = if (plan.longWait) longWaitAttempts else probeAttempts
+        for (attempt in 0 until maxProbes) {
+            if (attempt > 0) {
+                val remainingMs = (rollbackBudgetNs - (clockNs() - applyStartNs)) / 1_000_000L
+                if (remainingMs <= 0L) break
+                if (probeDelayMs > 0L) delay(minOf(probeDelayMs, remainingMs))
             }
-        }
-
-        // Only keep the change once the app can still reach the router.
-        repeat(if (plan.longWait) longWaitAttempts else probeAttempts) { attempt ->
-            if (attempt > 0) delay(probeDelayMs)
+            if (clockNs() - applyStartNs >= rollbackBudgetNs) break
             val reachable = try {
                 writer.send("system", "board", buildJsonObject {})
                 true
             } catch (e: CancellationException) {
+                withContext(NonCancellable) { rollback() }
                 throw e
             } catch (_: IOException) {
                 false
             }
             if (reachable) {
-                if (plan.checkInternet && !internetCameBack()) return ChangeOutcome.InternetNotBack
-                return try {
+                if (plan.checkInternet) {
+                    val back = try {
+                        internetCameBack(applyStartNs, rollbackBudgetNs)
+                    } catch (e: CancellationException) {
+                        withContext(NonCancellable) { rollback() }
+                        throw e
+                    }
+                    if (!back) {
+                        rollback()
+                        return ChangeOutcome.InternetNotBack
+                    }
+                }
+                if (clockNs() - applyStartNs >= rollbackBudgetNs) {
+                    rollback()
+                    return ChangeOutcome.LostConnection
+                }
+                try {
                     writer.send("uci", "confirm", buildJsonObject {})
-                    ChangeOutcome.Kept
                 } catch (e: CancellationException) {
+                    withContext(NonCancellable) { rollback() }
                     throw e
                 } catch (_: IOException) {
-                    ChangeOutcome.LostConnection
+                    return ChangeOutcome.LostConnection
                 }
+                // Run service reloads/enables only AFTER uci confirm so rollback never leaves enabled symlinks behind.
+                return runServices(plan.services)
             }
         }
         return ChangeOutcome.LostConnection
     }
 
+    private suspend fun runServices(services: List<Pair<String, List<String>>>): ChangeOutcome {
+        for ((command, params) in services) {
+            try {
+                val reply = writer.send("file", "exec", buildJsonObject {
+                    put("command", command)
+                    put("params", buildJsonArray { params.forEach { add(JsonPrimitive(it)) } })
+                })
+                val code = (reply["code"] as? JsonPrimitive)?.intOrNull ?: 0
+                if (code != 0) {
+                    val err = (reply["stderr"] as? JsonPrimitive)?.content?.ifBlank { null }
+                        ?: "Service command $command exited with code $code."
+                    return ChangeOutcome.Failed("Settings were kept, but $err")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                return ChangeOutcome.Failed("Settings were kept, but ${describe(e)}")
+            }
+        }
+        return ChangeOutcome.Kept
+    }
+
     /** True once `network.interface dump` shows the WAN up with an IPv4 address. */
-    private suspend fun internetCameBack(): Boolean {
-        repeat(internetAttempts) { attempt ->
-            if (attempt > 0) delay(probeDelayMs)
+    private suspend fun internetCameBack(applyStartNs: Long, rollbackBudgetNs: Long): Boolean {
+        for (attempt in 0 until internetAttempts) {
+            if (attempt > 0) {
+                val remainingMs = (rollbackBudgetNs - (clockNs() - applyStartNs)) / 1_000_000L
+                if (remainingMs <= 0L) break
+                if (probeDelayMs > 0L) delay(minOf(probeDelayMs, remainingMs))
+            }
+            if (clockNs() - applyStartNs >= rollbackBudgetNs) break
             val up = try {
                 val wan = com.shaazifi.app.feature.home.HomeParsers.parseWan(writer.send("network.interface", "dump", buildJsonObject {}))
                 wan.up && wan.ipv4 != null
@@ -400,6 +512,15 @@ class SafeChangeRunner(
             if (up) return true
         }
         return false
+    }
+
+    private suspend fun rollback() {
+        try {
+            writer.send("uci", "rollback", buildJsonObject {})
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: IOException) {
+        }
     }
 
     private suspend fun revert(configs: Set<String>) {
@@ -459,10 +580,18 @@ class ChangeController(
     suspend fun confirm() {
         val plan = (_state.value as? ChangeUiState.Confirming)?.plan ?: return
         _state.value = ChangeUiState.Running(plan)
-        val outcome = runPlan(plan)
-        _state.value = ChangeUiState.Done(outcome)
-        runCatching { onDone(plan, outcome) }
-        if (outcome == ChangeOutcome.Kept) onKept()
+        var completed = false
+        try {
+            val outcome = runPlan(plan)
+            _state.value = ChangeUiState.Done(outcome)
+            completed = true
+            runCatching { onDone(plan, outcome) }
+            if (outcome == ChangeOutcome.Kept) onKept()
+        } finally {
+            if (!completed && _state.value is ChangeUiState.Running) {
+                _state.value = ChangeUiState.Idle
+            }
+        }
     }
 
     fun dismiss() {

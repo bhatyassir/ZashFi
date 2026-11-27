@@ -53,16 +53,21 @@ fun LocalNetworkGate(prefs: LocalNetworkPrefs, content: @Composable () -> Unit) 
     }
     val scope = rememberCoroutineScope()
     var decision by remember { mutableStateOf<Decision?>(null) }
-    var skipped by remember { mutableStateOf(false) }
+    var skipped by remember { mutableStateOf<Boolean?>(null) }
 
     suspend fun refresh() {
         val activity = context as? Activity
-        decision = LocalNetworkAccess.decide(
+        val nextDecision = LocalNetworkAccess.decide(
             applies = true,
             granted = LocalNetworkAccess.granted(context),
             askedBefore = runCatching { prefs.askedBefore() }.getOrDefault(false),
             showRationale = activity?.shouldShowRequestPermissionRationale(LocalNetworkAccess.PERMISSION) == true
         )
+        if (nextDecision == Decision.Granted) {
+            runCatching { prefs.clearSkipped() }
+        }
+        skipped = runCatching { prefs.skipped() }.getOrDefault(false)
+        decision = nextDecision
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         scope.launch { refresh() }
@@ -71,10 +76,13 @@ fun LocalNetworkGate(prefs: LocalNetworkPrefs, content: @Composable () -> Unit) 
     // Coming back from the phone's settings: check again.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { scope.launch { refresh() } }
 
-    when (val d = decision) {
-        null -> Box(Modifier.fillMaxSize().background(SfTheme.colors.bg))
-        Decision.NotNeeded, Decision.Granted -> content()
-        Decision.Explain, Decision.OpenSettings -> if (skipped) content() else Explainer(
+    val d = decision
+    val isSkipped = skipped
+    when {
+        d == null || isSkipped == null -> Box(Modifier.fillMaxSize().background(SfTheme.colors.bg))
+        d == Decision.NotNeeded || d == Decision.Granted -> content()
+        isSkipped -> content()
+        else -> Explainer(
             openSettings = d == Decision.OpenSettings,
             onAllow = {
                 if (d == Decision.OpenSettings) {
@@ -88,7 +96,10 @@ fun LocalNetworkGate(prefs: LocalNetworkPrefs, content: @Composable () -> Unit) 
                     }
                 }
             },
-            onSkip = { skipped = true }
+            onSkip = {
+                skipped = true
+                scope.launch { runCatching { prefs.markSkipped() } }
+            }
         )
     }
 }

@@ -215,4 +215,27 @@ class HomeParsersTest {
         assertEquals("0" to "bps", HomeParsers.formatRate(0.0))
         assertEquals("1.20" to "Gbps", HomeParsers.formatRate(1_200_000_000.0))
     }
+
+    @Test
+    fun testParseRadiosFallsBackToIwinfoFrequencyWhenBandMissing() {
+        val status = obj(
+            """{
+              "radio0":{"up":true,"config":{},"interfaces":[
+                {"section":"a","ifname":"wlan0","config":{"mode":"ap","ssid":"Home24"},"iwinfo":{"frequency":2437,"channel":6}}
+              ]},
+              "radio1":{"up":true,"config":{},"interfaces":[
+                {"section":"b","ifname":"wlan1","config":{"mode":"ap","ssid":"Home5"},"iwinfo":{"frequency":5180,"channel":36}}
+              ]},
+              "radio2":{"up":true,"config":{},"interfaces":[
+                {"section":"c","ifname":"wlan2","config":{"mode":"ap","ssid":"Home6"},"iwinfo":{"frequency":5955,"channel":5}}
+              ]},
+              "radio3":{"up":true,"config":{},"iwinfo":{"frequency":60480},"interfaces":[
+                {"section":"d","ifname":"wlan3","config":{"mode":"ap","ssid":"Home60"}}
+              ]}
+            }"""
+        )
+        val radios = HomeParsers.parseRadios(status, mapOf("wlan2" to 2))
+        assertEquals(listOf("2.4 GHz", "5 GHz", "6 GHz", "60 GHz"), radios.map { it.band })
+        assertEquals(2, radios[2].clients)
+    }
 }

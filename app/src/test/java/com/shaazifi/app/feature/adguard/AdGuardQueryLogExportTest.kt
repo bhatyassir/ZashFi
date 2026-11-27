@@ -42,7 +42,7 @@ class AdGuardQueryLogExportTest {
         assertEquals(3L, export.count)
         assertEquals(listOf(2L, 3L), progress)
         assertEquals(listOf(null, boundary.time), repository.requests.map { it.cursor })
-        assertTrue(csv.startsWith("\"Timestamp\",\"Domain\",\"Record type\""))
+        assertTrue(csv.startsWith("\uFEFF\"Timestamp\",\"Domain\",\"Record type\""))
         assertTrue(csv.contains("\"'=2+2, \"\"lab\"\"\""))
         assertTrue(csv.contains("bø.example.test"))
         assertEquals(1, Regex("second\\.example\\.test").findAll(csv).count())
@@ -86,6 +86,35 @@ class AdGuardQueryLogExportTest {
         assertTrue(result.exceptionOrNull() is QueryLogExportException)
         assertEquals(2, repository.requests.size)
         assertTrue(folder.root.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun csvSanitizesControlCharsNbspZwspTabsCrAndMultilineFormulas() {
+        assertEquals("'=1+1", sanitizeCsvCell("\u0007=1+1"))
+        assertEquals("'\u00A0+2+2", sanitizeCsvCell("\u00A0+2+2"))
+        assertEquals("'\u200B@SUM(A1)", sanitizeCsvCell("\u200B@SUM(A1)"))
+        assertEquals("'\tfoo", sanitizeCsvCell("\tfoo"))
+        assertEquals("'\rbar", sanitizeCsvCell("\rbar"))
+        assertEquals("safe\n'=cmd|'/C calc'!A0\n'\tmore", sanitizeCsvCell("safe\n=cmd|'/C calc'!A0\n\tmore"))
+        assertEquals("safe\n'=1+1\n'\tindented", sanitizeCsvCell("safe\n=1+1\n\tindented"))
+        assertEquals("example.org", sanitizeCsvCell("example.org"))
+    }
+
+    @Test
+    fun cleanupOldExportsRemovesExpiredAndExcessFilesOnly() {
+        val now = 10_000_000_000L
+        val expired = folder.newFile("zashfi-dns-old.csv").apply { setLastModified(now - 7_200_000L) }
+        val keepOther = folder.newFile("unrelated.txt").apply { setLastModified(now - 7_200_000L) }
+        val recent = (1..6).map { idx ->
+            folder.newFile("zashfi-dns-r$idx.csv").apply { setLastModified(now - (6 - idx) * 1_000L) }
+        }
+
+        cleanupOldExports(folder.root, nowMs = now)
+
+        assertFalse(expired.exists())
+        assertTrue(keepOther.exists())
+        assertFalse(recent.first().exists())
+        assertTrue(recent.drop(1).all { it.exists() })
     }
 
     @Test

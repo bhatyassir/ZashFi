@@ -34,6 +34,9 @@ class FeatureChangesBatch2Test {
         assertTrue(allowed(p))
         assertTrue(error(FeatureChanges.dhcpPool("lan", "0", "150", "12h")).contains("First"))
         assertTrue(error(FeatureChanges.dhcpPool("lan", "200", "100", "12h")).contains("254"))
+        assertTrue(error(FeatureChanges.dhcpPool("lan", "100", "2147483647", "12h")).contains("254"))
+        assertTrue(plan(FeatureChanges.dhcpPool("lan", "100", "500", "12h", prefixBits = 22)).ops.isNotEmpty())
+        assertTrue(error(FeatureChanges.dhcpPool("lan", "100", "50", "12h", prefixBits = 25)).contains("126"))
         assertTrue(error(FeatureChanges.dhcpPool("lan", "100", "50", "1m")).contains("lease"))
         assertTrue(error(FeatureChanges.dhcpPool("lan", "100", "50", "forever")).contains("lease"))
         assertTrue(plan(FeatureChanges.dhcpPool("lan", "10", "20", "2d")).ops.isNotEmpty())
@@ -67,6 +70,9 @@ class FeatureChangesBatch2Test {
         assertEquals(UciOp.Set("wireless", "default_radio0", mapOf("ssid" to "Home-2")), nameOnly.ops.single())
 
         assertTrue(error(FeatureChanges.wifiNetwork("s", "Home", "Home", "short", "WPA2")).contains("8"))
+        assertTrue(FeatureChanges.wifiNetwork("s", "Home", "Home", "café-secret", "WPA2") is PlanResult.Ready)
+        assertTrue(FeatureChanges.wifiNetwork("s", "Home", "Home", "0123456789abcdef".repeat(4), "WPA2") is PlanResult.Ready)
+        assertTrue(error(FeatureChanges.wifiNetwork("s", "Home", "Home", "é".repeat(32), "WPA2")).contains("8"))
         assertTrue(error(FeatureChanges.wifiNetwork("s", "Home", "", "", "WPA2")).contains("name"))
         assertTrue(error(FeatureChanges.wifiNetwork("s", "Home", "x".repeat(33), "", "WPA2")).contains("32"))
         assertTrue(error(FeatureChanges.wifiNetwork("s", "Home", "Home", "", "WPA2")).contains("Nothing"))
@@ -77,7 +83,7 @@ class FeatureChangesBatch2Test {
     fun writerKeepsWifiChangesNarrow() {
         fun set(values: Map<String, Any>) = RouterWriter.argsFor(UciOp.Set("wireless", "s1", values)).let { (m, a) -> RouterWriter.isAllowedWrite("uci", m, a) }
         assertTrue(set(mapOf("ssid" to "x", "key" to "12345678")))
-        assertFalse(set(mapOf("encryption" to "none")))
+        assertTrue(set(mapOf("encryption" to "sae-mixed", "ieee80211w" to "1")))
         assertFalse(set(mapOf("network" to "wan")))
         assertFalse(set(mapOf("mode" to "sta")))
         assertFalse(set(mapOf("device" to "radio1")))

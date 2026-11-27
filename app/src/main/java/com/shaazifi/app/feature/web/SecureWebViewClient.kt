@@ -2,16 +2,17 @@ package com.shaazifi.app.feature.web
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.net.http.SslCertificate
 import android.net.http.SslError
+import android.os.Build
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import java.security.cert.CertificateFactory
-import java.security.cert.X509Certificate
+import java.io.ByteArrayInputStream
+import java.security.MessageDigest
 
 open class SecureWebViewClient(
     private val context: Context,
@@ -23,28 +24,38 @@ open class SecureWebViewClient(
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         if (request == null) return false
-        val url = request.url.toString()
+        val url = request.url?.toString() ?: return true
 
-        // 1. Enforce AddressGuard security rules
-        if (!SecureWebNavigation.isNavigationalAllowed(url, routerOrigin)) {
-            return true // Refuse navigation to dangerous or invalid destinations
-        }
-
-        // 2. Check if destination is internal to the router origin
-        if (SecureWebNavigation.isInternalNavigation(url, routerOrigin)) {
-            return false // Allow WebView to proceed internally
-        }
-
-        // 3. External links open in the system browser
-        return try {
-            val intent = Intent(Intent.ACTION_VIEW, request.url).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return when (SecureWebNavigation.decideNavigation(url, routerOrigin, request.isRedirect)) {
+            NavigationDecision.ALLOW_INTERNAL -> false
+            NavigationDecision.OPEN_EXTERNAL -> {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, request.url).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (_: Exception) {
+                    // Block if no handler found
+                }
+                true
             }
-            context.startActivity(intent)
-            true
-        } catch (_: Exception) {
-            true // Block if no handler found
+            NavigationDecision.BLOCK -> true
         }
+    }
+
+    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+        val url = request?.url?.toString() ?: return null
+        if (!SecureWebNavigation.isSubresourceAllowed(url, routerOrigin)) {
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Blocked by AddressGuard",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0))
+            )
+        }
+        return null
     }
 
     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -65,7 +76,7 @@ open class SecureWebViewClient(
             // Certificate mismatch or missing: hard stop
             handler.cancel()
             val presentedHash = if (certBytes != null) {
-                java.security.MessageDigest.getInstance("SHA-256")
+                MessageDigest.getInstance("SHA-256")
                     .digest(certBytes)
                     .joinToString(":") { "%02X".format(it) }
             } else {
@@ -78,20 +89,13 @@ open class SecureWebViewClient(
     private fun extractCertificateBytes(sslCert: SslCertificate?): ByteArray? {
         if (sslCert == null) return null
         return try {
-            val bundle = SslCertificate.saveState(sslCert)
-            val bytes = bundle.getByteArray("x509-certificate")
-            if (bytes != null) {
-                bytes
-            } else {
-                // Fallback: reflection on mX509Certificate field if bundle is empty
-                val field = sslCert.javaClass.getDeclaredField("mX509Certificate")
-                field.isAccessible = true
-                val x509 = field.get(sslCert) as? X509Certificate
-                x509?.encoded
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                sslCert.x509Certificate?.encoded?.let { return it }
             }
+            val bundle = SslCertificate.saveState(sslCert)
+            bundle.getByteArray("x509-certificate")
         } catch (_: Exception) {
             null
         }
     }
 }
-

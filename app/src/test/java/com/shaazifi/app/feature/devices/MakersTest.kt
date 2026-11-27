@@ -36,9 +36,10 @@ class MakersTest {
     @Test
     fun theBundledListIsCompleteAndCredited() {
         val f = listOf(File("src/main/assets/oui/makers.tsv"), File("app/src/main/assets/oui/makers.tsv")).first { it.isFile }
-        val real = Makers.parse(f.readText())
+        val real = f.bufferedReader().useLines { Makers.parse(it) }
         assertTrue(real.size > 40_000)
         assertEquals("Apple", real.lookup("3C:2E:FF:00:00:01"))
+        assertEquals("Apple", real.lookup("3c-2e-ff-00-00-01"))
         assertTrue(Credits.entries.any { it.name == "Wireshark (device maker list)" })
     }
 }

@@ -1,10 +1,14 @@
 package com.shaazifi.app.feature.quick
 
 import com.shaazifi.app.data.RouterProfile
+import com.shaazifi.app.feature.alerts.AlertNotifier
 import com.shaazifi.app.feature.demo.DemoMode
 import com.shaazifi.app.feature.web.MainTab
-import com.shaazifi.app.feature.web.MorePage
+import com.shaazifi.app.feature.widget.RouterWidget
+import com.shaazifi.app.feature.widget.WidgetSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -58,5 +62,38 @@ class QuickActionTest {
             assertTrue(block.contains("android:permission=\"android.permission.BIND_QUICK_SETTINGS_TILE\""))
             assertTrue(block.contains("android.service.quicksettings.action.QS_TILE"))
         }
+    }
+
+    @Test
+    fun pendingIntentActionsAndRequestCodesDoNotCollide() {
+        val actions = QuickAction.entries.map { it.intentAction() } +
+            listOf(RouterWidget.ACTION_WIDGET, AlertNotifier.ACTION_ALERT)
+        assertEquals(actions.size, actions.toSet().size)
+
+        val codes = QuickAction.entries.map { it.requestCode } + listOf(RouterWidget.REQUEST_CODE)
+        assertEquals(codes.size, codes.toSet().size)
+        assertNotEquals(QuickAction.ADGUARD_PAUSE.intentAction(), QuickAction.GUEST_WIFI.intentAction())
+    }
+
+    @Test
+    fun tileFeedbackReflectsCachedWidgetSnapshot() {
+        val activeSnap = WidgetSnapshot("r1", "Home", internetUp = true, devicesOnline = 4, adguardOn = true, updatedAt = 100L)
+        val offSnap = activeSnap.copy(adguardOn = false)
+
+        val onFeedback = tileFeedback(QuickAction.ADGUARD_PAUSE, "10 minutes", activeSnap)
+        assertTrue(onFeedback.active)
+        assertEquals("Protection on", onFeedback.subtitle)
+
+        val offFeedback = tileFeedback(QuickAction.ADGUARD_PAUSE, "10 minutes", offSnap)
+        assertFalse(offFeedback.active)
+        assertEquals("Protection off", offFeedback.subtitle)
+
+        val emptyFeedback = tileFeedback(QuickAction.ADGUARD_PAUSE, "10 minutes", null)
+        assertFalse(emptyFeedback.active)
+        assertEquals("10 minutes", emptyFeedback.subtitle)
+
+        val guestFeedback = tileFeedback(QuickAction.GUEST_WIFI, "Open to switch", activeSnap)
+        assertFalse(guestFeedback.active)
+        assertEquals("Home · Open to switch", guestFeedback.subtitle)
     }
 }

@@ -1,28 +1,38 @@
 package com.shaazifi.app.core.ubus
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 @Serializable
 data class UbusSession(
@@ -39,6 +49,13 @@ private data class UbusRpcRequest(
     val params: JsonArray
 )
 
+/**
+ * OpenWrt JSON-RPC client targeting `/ubus`.
+ *
+ * Note: for embedded OpenWrt routers (`uhttpd`/`rpcd`) that struggle with concurrent HTTP
+ * requests, configure `Dispatcher().apply { maxRequestsPerHost = 1 }` on the supplied [client]
+ * so RPC calls are serialized per host.
+ */
 class UbusClient(
     private val client: OkHttpClient
 ) {
@@ -55,6 +72,12 @@ class UbusClient(
     private val requestId = AtomicInteger(1)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    private val rpcClient: OkHttpClient = client.newBuilder()
+        .retryOnConnectionFailure(false)
+        .build()
+
+    private val refreshMutex = Mutex()
+    private val refreshedTokens = HashMap<Pair<String, String>, String>()
 
     /**
      * Executes session.login with OpenWrt ubus.
@@ -77,14 +100,14 @@ class UbusClient(
             args = args
         )
 
-        val token = data["ubus_rpc_session"]?.jsonPrimitive?.content
+        val token = (data["ubus_rpc_session"] as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content
         if (token.isNullOrBlank()) {
             throw UbusError.InvalidJson("Missing 'ubus_rpc_session' in login response: $data")
         }
 
-        val timeout = data["timeout"]?.jsonPrimitive?.intOrNull ?: 300
-        val userData = data["data"]?.jsonObject
-        val user = userData?.get("username")?.jsonPrimitive?.content ?: username
+        val timeout = (data["timeout"] as? JsonPrimitive)?.intOrNull ?: 300
+        val userData = data["data"] as? JsonObject
+        val user = (userData?.get("username") as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content ?: username
 
         UbusSession(token = token, timeoutSeconds = timeout, username = user)
     }
@@ -105,6 +128,8 @@ class UbusClient(
                 args = buildJsonObject {}
             )
             true
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             false
         }
@@ -112,8 +137,11 @@ class UbusClient(
 
     /**
      * Executes generic JSON-RPC call against /ubus.
-     * If onSessionExpired is provided, automatically retries strictly ONCE with the refreshed token
-     * upon session expiry or access denied (OpenWrt rpcd returns AccessDenied when a session has expired).
+     * If onSessionExpired is provided, automatically coordinates single-flight refresh via [refreshMutex]
+     * and retries strictly ONCE with the refreshed token upon session expiry or access denied
+     * (OpenWrt rpcd returns AccessDenied when a session has expired).
+     * If the retry after refresh still receives AccessDenied, it throws [UbusError.AccessDenied]
+     * with `isAclDenied = true` to distinguish missing rpcd ACL permissions from an expired session.
      */
     suspend fun call(
         endpointUrl: String,
@@ -126,17 +154,78 @@ class UbusClient(
         try {
             executeCall(endpointUrl, token, ubusObject, method, args)
         } catch (e: UbusError) {
-            if (onSessionExpired != null && (e is UbusError.SessionExpired || e is UbusError.AccessDenied)) {
-                val newToken = onSessionExpired()
+            if (onSessionExpired == null || (e !is UbusError.SessionExpired && e !is UbusError.AccessDenied)) {
+                throw e
+            }
+
+            val refreshKey = normalizeUbusUrl(endpointUrl) to token
+            val newToken = refreshMutex.withLock {
+                refreshedTokens[refreshKey] ?: onSessionExpired().also { fresh ->
+                    if (fresh.isNotBlank() && fresh != token) {
+                        if (refreshedTokens.size >= 32) refreshedTokens.clear()
+                        refreshedTokens[refreshKey] = fresh
+                    }
+                }
+            }
+
+            try {
                 // Retry strictly once with the newly refreshed token
                 executeCall(endpointUrl, newToken, ubusObject, method, args)
-            } else {
-                throw e
+            } catch (retryError: UbusError) {
+                if (retryError is UbusError.SessionExpired || retryError is UbusError.AccessDenied) {
+                    refreshMutex.withLock {
+                        if (refreshedTokens[refreshKey] == newToken) {
+                            refreshedTokens.remove(refreshKey)
+                        }
+                    }
+                }
+                if (retryError is UbusError.AccessDenied) {
+                    throw UbusError.AccessDenied(
+                        code = retryError.code,
+                        message = "ACL permission denied for '$ubusObject.$method' (code: ${retryError.code})",
+                        isAclDenied = true,
+                        ubusObject = ubusObject,
+                        method = method
+                    )
+                }
+                throw retryError
             }
         }
     }
 
-    private fun executeCall(
+    private data class RawResponse(val code: Int, val body: String)
+
+    /**
+     * Reads the whole response inside OkHttp's callback so call cancellation can abort a slow
+     * body (e.g. a router streaming its reply): `Call.cancel()` closes the exchange and the
+     * blocked read fails promptly. A coroutine cancelled while `response.body.string()` runs on
+     * the IO dispatcher could not otherwise be interrupted.
+     */
+    private suspend fun Call.awaitBody(): RawResponse = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { cancel() }
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (!continuation.isActive) return@use
+                    try {
+                        val body = resp.body.string()
+                        if (continuation.isActive) continuation.resume(RawResponse(resp.code, body))
+                    } catch (e: Exception) {
+                        // Cancellation closes the exchange underneath the read; it is not a call failure.
+                        if (continuation.isActive) {
+                            continuation.resumeWithException(e as? IOException ?: IOException(e))
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private suspend fun executeCall(
         endpointUrl: String,
         token: String,
         ubusObject: String,
@@ -162,35 +251,44 @@ class UbusClient(
             .build()
 
         val responseBody = try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val body = response.body.string()
-                    throw UbusError.HttpError(response.code, body)
-                }
-                response.body.string()
-            }
+            val raw = rpcClient.newCall(request).awaitBody()
+            if (raw.code !in 200..299) throw UbusError.HttpError(raw.code, raw.body)
+            raw.body
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: IOException) {
             if (e is UbusError) throw e
             throw UbusError.NetworkError(e)
         }
 
-        return parseUbusResponse(responseBody)
+        return parseUbusResponse(responseBody, ubusObject, method)
     }
 
-    private fun parseUbusResponse(rawJson: String): JsonObject {
+    private fun parseUbusResponse(
+        rawJson: String,
+        ubusObject: String? = null,
+        method: String? = null
+    ): JsonObject {
         val root = try {
             json.parseToJsonElement(rawJson).jsonObject
         } catch (_: Exception) {
             throw UbusError.InvalidJson(rawJson)
         }
 
-        // Check top-level JSON-RPC error
-        if (root.containsKey("error") && root["error"] != null) {
-            val errObj = root["error"]?.jsonObject
-            val code = errObj?.get("code")?.jsonPrimitive?.intOrNull ?: -1
-            val msg = errObj?.get("message")?.jsonPrimitive?.content ?: "Unknown RPC error"
+        // Check top-level JSON-RPC error (treat "error": null / JsonNull as no error)
+        val errElement = root["error"]
+        if (errElement != null && errElement !is JsonNull) {
+            val errObj = (errElement as? JsonObject)
+                ?: throw UbusError.InvalidJson("Malformed 'error' field in response: $rawJson")
+            val code = (errObj["code"] as? JsonPrimitive)?.intOrNull ?: -1
+            val msg = (errObj["message"] as? JsonPrimitive)?.contentOrNull ?: "Unknown RPC error"
             if (code == -32002) {
-                throw UbusError.AccessDenied(code, msg)
+                throw UbusError.AccessDenied(
+                    code = code,
+                    message = msg,
+                    ubusObject = ubusObject,
+                    method = method
+                )
             }
             throw UbusError.RpcError(code, msg)
         }
@@ -203,7 +301,12 @@ class UbusClient(
             throw UbusError.InvalidJson("Empty 'result' array: $rawJson")
         }
 
-        val statusCode = resultArray[0].jsonPrimitive.int
+        val statusCode = try {
+            (resultArray[0] as? JsonPrimitive)?.intOrNull
+        } catch (_: Exception) {
+            null
+        } ?: throw UbusError.InvalidJson("Invalid non-integer status code in 'result' array: $rawJson")
+
         when (statusCode) {
             0 -> {
                 val data = resultArray.getOrNull(1)
@@ -211,7 +314,11 @@ class UbusClient(
             }
             4 -> throw UbusError.SessionExpired(4)
             5 -> throw UbusError.ObjectNotFound(5)
-            6 -> throw UbusError.AccessDenied(6)
+            6 -> throw UbusError.AccessDenied(
+                code = 6,
+                ubusObject = ubusObject,
+                method = method
+            )
             else -> throw UbusError.RpcError(statusCode, "Ubus call failed with code $statusCode")
         }
     }
@@ -219,11 +326,27 @@ class UbusClient(
     fun normalizeUbusUrl(url: String): String {
         val trimmed = url.trim()
         val parsed = trimmed.toHttpUrlOrNull()
-        return if (parsed != null) {
-            parsed.newBuilder().encodedPath("/ubus").build().toString()
-        } else {
-            val withoutSlash = trimmed.removeSuffix("/")
-            if (withoutSlash.endsWith("/ubus")) withoutSlash else "$withoutSlash/ubus"
+        if (parsed != null) {
+            var path = parsed.encodedPath.trimEnd('/')
+            if (path.endsWith("/untangled")) {
+                path = path.removeSuffix("/untangled")
+            }
+            val finalPath = when {
+                path.isEmpty() -> "/ubus"
+                path == "/ubus" || path.endsWith("/ubus") -> path
+                else -> "$path/ubus"
+            }
+            return parsed.newBuilder()
+                .encodedPath(finalPath)
+                .query(null)
+                .fragment(null)
+                .build()
+                .toString()
         }
+        var withoutSlash = trimmed.removeSuffix("/")
+        if (withoutSlash.endsWith("/untangled")) {
+            withoutSlash = withoutSlash.removeSuffix("/untangled")
+        }
+        return if (withoutSlash.endsWith("/ubus")) withoutSlash else "$withoutSlash/ubus"
     }
 }

@@ -47,9 +47,13 @@ object LocalNetworkAccess {
         ContextCompat.checkSelfPermission(context, PERMISSION) == PackageManager.PERMISSION_GRANTED
 }
 
-/** Remembers whether the app has asked once (needed to tell "not asked yet" from "refused for good"). */
+/** Remembers whether the app has asked once (needed to tell "not asked yet" from "refused for good") or been skipped by a VPN-only user. */
 class LocalNetworkPrefs(private val dataStore: DataStore<Preferences>) {
     private val asked = booleanPreferencesKey("local_network_asked")
+    private val skippedKey = booleanPreferencesKey("local_network_skipped")
     suspend fun askedBefore(): Boolean = dataStore.data.first()[asked] ?: false
     suspend fun markAsked() { dataStore.edit { it[asked] = true } }
+    suspend fun skipped(): Boolean = dataStore.data.first()[skippedKey] ?: false
+    suspend fun markSkipped() { dataStore.edit { it[skippedKey] = true } }
+    suspend fun clearSkipped() { dataStore.edit { it.remove(skippedKey) } }
 }

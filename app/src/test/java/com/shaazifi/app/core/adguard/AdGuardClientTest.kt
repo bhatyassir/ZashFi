@@ -2,16 +2,22 @@ package com.shaazifi.app.core.adguard
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.time.ZonedDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 class AdGuardClientTest {
 
@@ -331,5 +337,170 @@ class AdGuardClientTest {
         assertNull("Unreadable status must be unknown, not guessed", dashboard.safeBrowsingEnabled)
         assertNull(dashboard.parentalEnabled)
         assertEquals(100L, dashboard.stats.numDnsQueries)
+    }
+
+    @Test
+    fun testProbeRejectsNonAdGuard401IndicatorsAndNormalizesTrailingSlash(): Unit = runBlocking {
+        // Non-AdGuard WWW-Authenticate realm
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("WWW-Authenticate", "Basic realm=\"OpenWrt\"")
+        )
+        val r1 = client.probeEndpointDetailed("$baseUrl/")
+        assertFalse(r1.isAdGuard)
+        assertEquals("/control/status", server.takeRequest().path)
+
+        // HTML error body on 401
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("Content-Type", "text/html")
+                .setBody("<html><body>401 Unauthorized</body></html>")
+        )
+        assertFalse(client.probeEndpointDetailed(baseUrl).isAdGuard)
+        server.takeRequest()
+
+        // Non-AdGuard Server header on 401
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("Server", "uhttpd")
+        )
+        assertFalse(client.probeEndpointDetailed(baseUrl).isAdGuard)
+        server.takeRequest()
+    }
+
+    @Test
+    fun testLoadDashboardAlreadyProbedSkipsProbeAndCaseInsensitiveHttp() = runBlocking {
+        var unauthRequests = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.getHeader("Authorization") == null) unauthRequests++
+                return when (request.path) {
+                    "/control/status" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"version":"v0.107.54","protection_enabled":true,"dns_addresses":["192.168.1.1"]}""")
+                    "/control/stats" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"num_dns_queries":10,"num_blocked_filtering":1,"avg_processing_time":0.005}""")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val upperHttpUrl = baseUrl.replaceFirst("http://", "HTTP://") + "/"
+        val dashboard = client.loadDashboard(upperHttpUrl, "admin", "p@ss", alreadyProbed = true)
+        assertEquals(0, unauthRequests)
+        assertTrue(dashboard.isCleartextHttp)
+        assertEquals(10L, dashboard.stats.numDnsQueries)
+    }
+
+    @Test
+    fun testLoadDashboardDoesNotSwallowUnauthorizedOrRateLimitedOnSecondaryCalls() = runBlocking {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val signedIn = request.getHeader("Authorization") != null
+                return when (request.path) {
+                    "/control/status" -> if (!signedIn) MockResponse().setResponseCode(401)
+                        else MockResponse().setResponseCode(200)
+                            .setBody("""{"version":"v0.107.54","protection_enabled":true,"dns_addresses":["192.168.1.1"]}""")
+                    "/control/stats" -> MockResponse().setResponseCode(200)
+                        .setBody("""{"num_dns_queries":10,"num_blocked_filtering":1,"avg_processing_time":0.005}""")
+                    "/control/filtering/status" -> MockResponse().setResponseCode(429).setHeader("Retry-After", "0")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"enabled":true}""")
+                }
+            }
+        }
+
+        try {
+            client.loadDashboard(baseUrl, "admin", "pass")
+            fail("Expected AdGuardError.RateLimited to propagate from secondary call")
+        } catch (e: AdGuardError.RateLimited) {
+            assertEquals(0, e.retryAfterSeconds)
+            assertTrue(e.message!!.contains("shortly"))
+        }
+    }
+
+    @Test
+    fun testRetryAfterParsesZeroAndHttpDate() {
+        val now = 1_700_000_000_000L
+        assertEquals(0, AdGuardError.parseRetryAfterSeconds("0", now))
+
+        val futureDate = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(now + 45_000L),
+            ZoneOffset.UTC
+        ).format(DateTimeFormatter.RFC_1123_DATE_TIME)
+        assertEquals(45, AdGuardError.parseRetryAfterSeconds(futureDate, now))
+
+        val pastDate = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochMilli(now - 5_000L),
+            ZoneOffset.UTC
+        ).format(DateTimeFormatter.RFC_1123_DATE_TIME)
+        assertEquals(0, AdGuardError.parseRetryAfterSeconds(pastDate, now))
+    }
+
+    @Test
+    fun testSetParentalEnableAndDisable() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200))
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        client.setParental("$baseUrl/", "admin", "päss", enabled = true)
+        val req1 = server.takeRequest()
+        assertEquals("/control/parental/enable", req1.path)
+        assertEquals("POST", req1.method)
+        assertNull(req1.headers["Content-Type"])
+        assertEquals(okhttp3.Credentials.basic("admin", "päss", Charsets.UTF_8), req1.headers["Authorization"])
+
+        client.setParental(baseUrl, "admin", "päss", enabled = false)
+        val req2 = server.takeRequest()
+        assertEquals("/control/parental/disable", req2.path)
+        assertEquals("POST", req2.method)
+        assertNull(req2.headers["Content-Type"])
+    }
+
+    @Test
+    fun testLegacyFallbacksForQueryLogSettingsAndProtection() = runBlocking {
+        // loadQueryLogSettings falls back to /control/querylog_info on 404
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"enabled":true,"anonymize_client_ip":false}"""))
+
+        val settings = client.loadQueryLogSettings(baseUrl, "admin", "pass")
+        assertEquals(true, settings.enabled)
+        assertEquals(false, settings.anonymizeClientIp)
+        assertEquals("/control/querylog/config", server.takeRequest().path)
+        assertEquals("/control/querylog_info", server.takeRequest().path)
+
+        // setProtection falls back to /control/dns_config on 404
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.enqueue(MockResponse().setResponseCode(200))
+
+        client.setProtection(baseUrl, "admin", "pass", enabled = false)
+        val modernReq = server.takeRequest()
+        val legacyReq = server.takeRequest()
+        assertEquals("/control/protection", modernReq.path)
+        assertEquals("/control/dns_config", legacyReq.path)
+        assertEquals("""{"protection_enabled":false}""", legacyReq.body.readUtf8())
+    }
+
+    @Test
+    fun testHttpAdGuardCallerAccepts204AndBoundedErrorBody() = runBlocking {
+        val caller = HttpAdGuardCaller(OkHttpClient(), "$baseUrl/", "admin") { "päss" }
+
+        server.enqueue(MockResponse().setResponseCode(204))
+        val res = caller.send("POST", "/cache_clear")
+        assertNull(res)
+        val req = server.takeRequest()
+        assertEquals("/control/cache_clear", req.path)
+        assertEquals(okhttp3.Credentials.basic("admin", "päss", Charsets.UTF_8), req.headers["Authorization"])
+
+        val longErr = "X".repeat(500)
+        server.enqueue(MockResponse().setResponseCode(500).setBody(longErr))
+        try {
+            caller.get("/status")
+            fail("Expected HttpError")
+        } catch (e: AdGuardError.HttpError) {
+            assertEquals(500, e.statusCode)
+            assertNotNull(e.message)
+            assertTrue(e.message!!.length <= 215)
+        }
     }
 }

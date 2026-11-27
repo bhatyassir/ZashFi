@@ -14,7 +14,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -37,42 +40,50 @@ fun ChangeHost(controller: ChangeController, demo: Boolean = false) {
     val c = SfTheme.colors
     when (val s = state) {
         ChangeUiState.Idle -> Unit
-        is ChangeUiState.Confirming -> AlertDialog(
-            onDismissRequest = { controller.cancel() },
-            title = { Text(s.plan.title) },
-            text = {
-                Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    s.plan.lines.forEach { line ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(line.label, fontWeight = FontWeight.SemiBold, color = c.ink, modifier = Modifier.weight(1f))
-                            if (line.before.isNotBlank()) {
-                                Text(line.before, style = SfText.mono, color = c.muted)
-                                Text("→", color = c.muted)
+        is ChangeUiState.Confirming -> {
+            var applying by remember(s.plan) { mutableStateOf(false) }
+            AlertDialog(
+                onDismissRequest = { if (!applying) controller.cancel() },
+                title = { Text(s.plan.title) },
+                text = {
+                    Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        s.plan.lines.forEach { line ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(line.label, fontWeight = FontWeight.SemiBold, color = c.ink, modifier = Modifier.weight(1f))
+                                if (line.before.isNotBlank()) {
+                                    Text(line.before, style = SfText.mono, color = c.muted)
+                                    Text("→", color = c.muted)
+                                }
+                                Text(line.after, style = SfText.mono, color = c.ink)
                             }
-                            Text(line.after, style = SfText.mono, color = c.ink)
+                        }
+                        s.plan.note?.let { Text(it, style = SfText.sub, color = c.muted) }
+                        if (!demo && s.plan.checkInternet) {
+                            Text(
+                                "The app also checks that the internet comes back. If it doesn't, the old settings return by themselves within 2 minutes.",
+                                style = SfText.sub,
+                                color = c.muted
+                            )
+                        }
+                        if (!demo && s.plan.command == null && s.plan.ubusCall == null) {
+                            Text(
+                                "Safety: if the app cannot reach the router after this change, the router puts the old setting back by itself within 2 minutes.",
+                                style = SfText.sub,
+                                color = c.muted
+                            )
                         }
                     }
-                    s.plan.note?.let { Text(it, style = SfText.sub, color = c.muted) }
-                    if (!demo && s.plan.checkInternet) {
-                        Text(
-                            "The app also checks that the internet comes back. If it doesn't, the old settings return by themselves within 2 minutes.",
-                            style = SfText.sub,
-                            color = c.muted
-                        )
-                    }
-                    if (!demo && s.plan.command == null && s.plan.ubusCall == null) {
-                        Text(
-                            "Safety: if the app cannot reach the router after this change, the router puts the old setting back by itself within 2 minutes.",
-                            style = SfText.sub,
-                            color = c.muted
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { scope.launch { controller.confirm() } }) { Text("Apply") } },
-            dismissButton = { TextButton(onClick = { controller.cancel() }) { Text("Cancel") } }
-        )
+                },
+                confirmButton = {
+                    TextButton(enabled = !applying, onClick = {
+                        applying = true
+                        scope.launch { controller.confirm() }
+                    }) { Text("Apply") }
+                },
+                dismissButton = { TextButton(enabled = !applying, onClick = { controller.cancel() }) { Text("Cancel") } }
+            )
+        }
         is ChangeUiState.Running -> AlertDialog(
             onDismissRequest = {},
             properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),

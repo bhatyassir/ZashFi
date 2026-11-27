@@ -1,17 +1,43 @@
 package com.shaazifi.app.feature.router
 
+import com.shaazifi.app.feature.home.CpuSample
 import com.shaazifi.app.feature.home.HomeParsers
 import com.shaazifi.app.ui.theme.PillTone
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.util.Calendar
 import java.util.Locale
+
+/** Caches prior CPU sample and board metadata across live refreshes of System health. */
+class HealthSampleCache {
+    private var previousCpu: CpuSample? = null
+    private var cachedBoard: JsonObject? = null
+
+    @Synchronized
+    fun nextCpuPct(current: CpuSample?): Int? {
+        val prev = previousCpu
+        if (current != null) previousCpu = current
+        return HomeParsers.cpuUsedPct(prev, current)
+    }
+
+    @Synchronized
+    fun board(): JsonObject? = cachedBoard
+
+    @Synchronized
+    fun setBoard(board: JsonObject) {
+        cachedBoard = board
+    }
+}
 
 /** What a feature loader may need besides the router. */
 data class FeatureContext(
     val adGuardConfigured: Boolean,
     val routerIp: String = "",
-    val liveUsageMeter: LiveUsageMeter = LiveUsageMeter()
+    val liveUsageMeter: LiveUsageMeter = LiveUsageMeter(),
+    val healthCache: HealthSampleCache = HealthSampleCache(),
+    /** Phone-local history for uptime and thermal trend panels; null in tests and demo. */
+    val localHistory: com.shaazifi.app.feature.home.LocalHistoryStore? = null
 )
 
 /**
@@ -115,7 +141,8 @@ object Features {
             val dev = { id: String -> kotlinx.serialization.json.buildJsonObject { put("device", kotlinx.serialization.json.JsonPrimitive(id)) } }
             val freq = radioIds.associateWith { r.optional("iwinfo", "freqlist", dev(it)) }
             val power = radioIds.associateWith { r.optional("iwinfo", "txpowerlist", dev(it)) }
-            FeatureMappers.wireless(wifi, WifiRadio.radioInfos(wifi, freq, power))
+            val country = radioIds.associateWith { r.optional("iwinfo", "countrylist", dev(it)) }
+            FeatureMappers.wireless(wifi, WifiRadio.radioInfos(wifi, freq, power, country))
         },
 
         FeatureSpec("guest", WIFI, "Guest network", "Internet for visitors", "guest",
@@ -260,11 +287,19 @@ object Features {
                 ViewSection("This router", listOf(row("Tailscale address", "100.64.0.7", mono = true))))
         ) { r, _ ->
             r.gate()
-            val res = r.execFirst(
+            val candidates = listOf(
                 "/usr/sbin/tailscale" to listOf("status", "--json"),
                 "/usr/bin/tailscale" to listOf("status", "--json")
-            ) ?: throw FeatureLoadException.NotInstalled()
-            FeatureMappers.tailscale(res.stdout)
+            )
+            var found: ExecResult? = null
+            for ((cmd, params) in candidates) {
+                val res = r.exec(cmd, params) ?: continue
+                if (res.code == 127) continue
+                found = res
+                if (res.code == 0 || res.stdout.isNotBlank()) break
+            }
+            val res = found ?: throw FeatureLoadException.NotInstalled()
+            FeatureMappers.tailscale(res.stdout, exitCode = res.code, stderr = res.stderr)
         },
 
         // ---- Speed and usage
@@ -319,9 +354,19 @@ object Features {
             )
         ) { r, _ ->
             r.gate()
-            val vn = r.execFirst("/usr/bin/vnstat" to listOf("--json"))?.stdout
-            val nl = r.execFirst("/usr/sbin/nlbw" to listOf("-c", "json", "-g", "ip,mac", "-o", "rx_bytes"))?.stdout
-            FeatureMappers.usage(vn, nl, r.wanDevice(), r.namesByMac())
+            val vn = r.exec("/usr/bin/vnstat", listOf("--json"))
+            val nl = r.exec("/usr/sbin/nlbw", listOf("-c", "json", "-g", "ip,mac", "-o", "rx_bytes"))
+            val cal = Calendar.getInstance()
+            val todayDate = Triple(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+            FeatureMappers.usage(
+                vnstatOut = vn?.stdout,
+                nlbwOut = nl?.stdout,
+                wanDevice = r.wanDevice(),
+                nameByMac = r.namesByMac(),
+                vnstatResult = vn,
+                nlbwResult = nl,
+                todayDate = todayDate
+            )
         },
 
         // ---- System
@@ -338,14 +383,15 @@ object Features {
         FeatureSpec("health", SYSTEM, "System health", "Processor, memory, storage", null, liveRefreshMs = 5_000,
             demo = demo("How hard the router is working.", ViewPill("Healthy", PillTone.Ok),
                 ViewSection("Now", listOf(row("Processor", "8%"), row("Memory", "42%", sub = "182 MB of 432 MB in use"), row("Storage", "34%", sub = "61 MB of 178 MB in use"), row("Running for", "3 d 4 h"))))
-        ) { r, _ ->
-            r.gate()
+        ) { r, ctx ->
+            val board = ctx.healthCache.board()?.also { r.gate() }
+                ?: r.required("system", "board", sessionGate = true).also { ctx.healthCache.setBoard(it) }
             val info = r.required("system", "info")
-            // CPU use needs two readings of /proc/stat one second apart (same method as Home).
-            val first = r.readFile("/proc/stat")?.let { HomeParsers.parseCpuSample(it) }
-            kotlinx.coroutines.delay(1_000)
-            val second = r.readFile("/proc/stat")?.let { HomeParsers.parseCpuSample(it) }
-            FeatureMappers.health(info, HomeParsers.cpuUsedPct(first, second))
+            val cpuSample = r.readFile("/proc/stat")?.let { HomeParsers.parseCpuSample(it) }
+            val cpuPct = ctx.healthCache.nextCpuPct(cpuSample)
+            val thermals = r.readThermals()
+            val offloading = r.readFlowOffloading()
+            FeatureMappers.health(info, cpuPct, thermals = thermals, board = board, offloading = offloading)
         },
 
         FeatureSpec("services", SYSTEM, "Services", "Programs on the router", null, liveRefreshMs = 5_000,
@@ -388,7 +434,114 @@ object Features {
             demo = demo("Programs installed on the router.", ViewPill("312 packages", PillTone.Off), ViewSection("Useful extras", listOf(row("vnstat", pill = ViewPill("Installed", PillTone.Ok)))))
         ) { r, _ ->
             r.gate()
-            FeatureMappers.software(r.execFirst("/usr/bin/apk" to listOf("list", "-I"), "/bin/opkg" to listOf("list-installed"))?.stdout)
+            FeatureMappers.software(
+                r.execFirst(
+                    "/usr/bin/apk" to listOf("info"),
+                    "/usr/bin/apk" to listOf("list", "-I"),
+                    "/bin/opkg" to listOf("list-installed")
+                )?.stdout
+            )
+        },
+
+        // ---- Pages that complete the LuCI menus (read-only unless stated).
+        FeatureSpec("inspector", SYSTEM, "Router inspector", "Processes, routes, firewall and channels", null,
+            demo = demo("Live router state.", null, ViewSection("Processes", listOf(row("1", "/sbin/procd", mono = true))))
+        ) { r, _ -> r.gate(); RouterTools.inspector(r) },
+
+        FeatureSpec("configtasks", SYSTEM, "Configuration & tasks", "Cron, DNS, bandwidth monitor and LEDs", null,
+            demo = demo("Router configuration.", null, ViewSection("Scheduled tasks", listOf(row("Job 1", "0 23 * * * led-nightmode night", mono = true))))
+        ) { r, _ -> r.gate(); RouterTools.configuration(r) },
+
+        FeatureSpec("firewallx", PROTECTION, "Firewall extras", "NAT rules, IP sets and custom rules", null,
+            demo = demo("Extra firewall views.", null, ViewSection("NAT Rules", listOf(row("No NAT rules", ""))))
+        ) { r, _ -> r.gate(); ExtraPanels.firewallExtras(r) },
+
+        FeatureSpec("realtime", SPEED, "Realtime & channels", "Live graphs and Wi-Fi channel survey", null,
+            demo = demo("Live router graphs.", null, ViewSection("Channel analysis", listOf(row("phy0", "channel 1", mono = true))))
+        ) { r, _ -> r.gate(); RealtimePanels.realtimeAndChannels(r) },
+
+        FeatureSpec("tailscale-peers", VPN, "Tailscale peers", "Devices on your private network", null,
+            demo = demo("Tailscale peers.", ViewPill("Connected", PillTone.Ok), ViewSection("Tailscale", listOf(row("This router", "100.64.0.7", mono = true))))
+        ) { r, _ -> r.gate(); ExtraPanels.tailscaleDetails(r) },
+
+        FeatureSpec("adguardpkg", PROTECTION, "AdGuard package", "The router's AdGuard Home settings", null,
+            demo = demo("AdGuard Home on the router.", ViewPill("On", PillTone.Ok), ViewSection("Package", listOf(row("Enabled", "On"))))
+        ) { r, _ -> r.gate(); AdGuardPackagePanel.load(r) },
+
+        FeatureSpec("wifiextras", WIFI, "Wireless tools", "WPS, MAC filtering, isolation and VLANs", null,
+            demo = demo("Extra Wi-Fi settings.", null, ViewSection("Client isolation", listOf(row("Off", ""))))
+        ) { r, _ ->
+            r.gate()
+            val wifi = r.uci("wireless")!!
+            val sections = wifi.ofType("wifi-iface")
+            WifiExtras.panel(wifi).copy(forms = listOf(
+                FeatureForm("Wi-Fi protection", listOf(
+                    FormField("section", "Network section", sections.firstOrNull()?.id.orEmpty(),
+                        choices = sections.map { it.id }),
+                    FormField("mode", "What to change", "isolate",
+                        choices = listOf("isolate", "wps", "wds")),
+                    FormField("on", "On or off", "0", choices = listOf("0", "1"))
+                ), "Apply") { v ->
+                    val on = v["on"] == "1"
+                    when (v["mode"]) {
+                        "wps" -> WifiExtras.setWps(v["section"].orEmpty(), on)
+                        "wds" -> WifiExtras.setWds(v["section"].orEmpty(), on)
+                        else -> WifiExtras.setIsolate(v["section"].orEmpty(), on)
+                    }
+                },
+                FeatureForm("MAC filtering", listOf(
+                    FormField("section", "Network section", sections.firstOrNull()?.id.orEmpty(),
+                        choices = sections.map { it.id }),
+                    FormField("mode", "Mode", "disabled", choices = listOf("disabled", "allow", "deny")),
+                    FormField("macs", "Allowed or blocked MACs", "",
+                        hint = "Pick devices above, or type MACs separated by commas",
+                        pick = com.shaazifi.app.feature.router.PickKind.DEVICE_MAC, multi = true)
+                ), "Apply") { v ->
+                    WifiExtras.setMacFilter(v["section"].orEmpty(), v["mode"].orEmpty(), v["macs"].orEmpty())
+                },
+                FeatureForm("Guest VLAN", listOf(
+                    FormField("section", "Guest section", sections.firstOrNull { it.list("network").any { n -> n.contains("guest") } }?.id.orEmpty(),
+                        choices = sections.filter { it.list("network").any { n -> n.contains("guest") } }.map { it.id }),
+                    FormField("vlan", "VLAN ID (1–4094)")
+                ), "Apply") { v -> WifiExtras.setGuestVlan(v["section"].orEmpty(), v["vlan"].orEmpty()) }
+            ))
+        },
+
+        FeatureSpec("downtimeline", INTERNET, "Internet uptime", "Outages and daily availability", null,
+            demo = demo("Internet availability.", ViewPill("Healthy", PillTone.Ok), ViewSection("Outages", listOf(row("Today", "No outages"))))
+        ) { _, ctx ->
+            val events = ctx.localHistory?.readNetEvents().orEmpty()
+            val outages = com.shaazifi.app.feature.home.mergeOutages(events)
+            val now = System.currentTimeMillis()
+            FeatureView("Internet availability recorded on this phone.", null, listOf(
+                ViewSection("Outages", listOf(ViewRow("Summary", com.shaazifi.app.feature.home.summary(outages, now))),
+                    emptyText = "No outages recorded yet."),
+                ViewSection("Last 7 days", com.shaazifi.app.feature.home.dailyUptime(events, now - 7L * 86_400_000L, 7)
+                    .map { (day, pct) -> ViewRow(java.time.Instant.ofEpochMilli(day).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString(), "$pct% up") },
+                    emptyText = "No uptime history yet.")
+            ))
+        },
+
+        FeatureSpec("thermaltrend", SYSTEM, "Temperature trends", "How hot the router is getting", null,
+            demo = demo("Temperature history.", ViewPill("Stable", PillTone.Ok), ViewSection("Sensors", listOf(row("CPU", "49 °C"))))
+        ) { r, ctx ->
+            r.gate()
+            val sensors = r.readThermals()
+            val samples = ctx.localHistory?.readThermalSamples().orEmpty()
+            val now = System.currentTimeMillis()
+            val trendRows = sensors.mapNotNull { sensor ->
+                val t = com.shaazifi.app.feature.home.trend(samples.filter { it.sensorId == sensor.id }, 30)
+                if (t == null) null else ViewRow(
+                    sensor.label,
+                    com.shaazifi.app.feature.home.alertText(t),
+                    pill = if (com.shaazifi.app.feature.home.isDangerous(t, sensor.maxCelsius)) ViewPill("Rising", PillTone.Bad) else null
+                )
+            }
+            FeatureView("Temperature history is kept on this phone.", null, listOf(
+                ViewSection("Now", sensors.map { ViewRow(it.label, "%.1f °C".format(Locale.US, it.tempCelsius), mono = true) },
+                    emptyText = "No temperature sensors were reported."),
+                ViewSection("30-minute trend", trendRows, emptyText = "Not enough history yet; trends appear after a few readings.")
+            ))
         }
     )
 

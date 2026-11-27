@@ -329,4 +329,52 @@ class AdGuardParsersTest {
         org.junit.Assert.assertNull(AdGuardParsers.parseEnabledFlag("""{}"""))
         org.junit.Assert.assertNull(AdGuardParsers.parseEnabledFlag("not json"))
     }
+
+    @Test
+    fun nullArraysAndPrimitivesDoNotCrashParsers() {
+        val status = AdGuardParsers.parseStatus(
+            """{"version":null,"dns_addresses":null,"protection_enabled":null,"running":null}"""
+        )
+        assertEquals("unknown", status.version)
+        assertTrue(status.dnsAddresses.isEmpty())
+        assertFalse(status.protectionEnabled)
+
+        val stats = AdGuardParsers.parseStats(
+            """{"time_units":null,"dns_queries":null,"top_queried_domains":null,"top_blocked_domains":null,"top_clients":null}"""
+        )
+        assertEquals("hours", stats.timeUnits)
+        assertTrue(stats.dnsQueries.isEmpty())
+        assertTrue(stats.topQueriedDomains.isEmpty())
+
+        val filtering = AdGuardParsers.parseFilteringStatus("""{"enabled":null,"filters":null,"user_rules":null}""")
+        assertTrue(filtering.enabled)
+        assertEquals(0, filtering.activeFilterCount)
+        assertEquals(0, filtering.userRuleCount)
+
+        val safeSearch = AdGuardParsers.parseSafeSearchStatus("""{"enabled":null,"google":null}""")
+        assertFalse(safeSearch.enabled)
+        assertFalse(safeSearch.google)
+    }
+
+    @Test
+    fun filteredInvalidIsBlockedDefaultReasonAndIdenticalTimestampKeysAreDistinct() {
+        val log = AdGuardParsers.parseQueryLog(
+            """
+            {
+              "oldest": "2026-11-16T10:00:00Z",
+              "data": [
+                {"time":"2026-11-16T10:00:02Z","question":{"name":"bad.invalid","type":"A"},"client":"192.0.2.10","reason":"FilteredInvalid"},
+                {"time":"2026-11-16T10:00:01Z","question":{"name":"ok.example.test","type":"A"},"client":"192.0.2.10"},
+                {"time":"2026-11-16T10:00:01Z","question":{"name":"ok.example.test","type":"A"},"client":"192.0.2.10"}
+              ]
+            }
+            """.trimIndent()
+        )
+        assertEquals(3, log.items.size)
+        assertTrue(log.items[0].isBlocked)
+        assertEquals("Blocked", log.items[0].outcomeLabel)
+        assertEquals("NotFilteredNotFound", log.items[1].reason)
+        assertEquals("Not filtered", log.items[1].outcomeLabel)
+        assertEquals(3, log.items.distinctBy { it.key }.size)
+    }
 }

@@ -3,6 +3,7 @@ package com.shaazifi.app.feature.routers
 import com.shaazifi.app.core.session.ProbeDiagnostic
 import com.shaazifi.app.core.session.ProbeException
 import com.shaazifi.app.core.session.SessionManager
+import com.shaazifi.app.data.normalizeRouterAddress
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -73,29 +74,64 @@ class AddRouterStateHolder(
 
         val result = sessionManager.probeCertificate(currentAddress)
         if (result.isSuccess) {
-            val fp = result.getOrNull() ?: ""
-            val isHttp = fp == "HTTP_NO_PIN" || currentAddress.startsWith("http://")
-            _state.value = _state.value.copy(
-                isProbing = false,
-                discoveredFingerprint = fp,
-                isHttp = isHttp,
-                showApprovalDialog = true,
-                errorMessage = null,
-                diagnostic = null
-            )
+            val normalized = normalizeRouterAddress(currentAddress) ?: currentAddress
+            applyProbeSuccess(normalized, result.getOrNull() ?: "")
         } else {
-            val error = result.exceptionOrNull()
-            val diag = (error as? ProbeException)?.diagnostic
-                ?: ProbeDiagnostic(
-                    exceptionClass = error?.javaClass?.name ?: "UnknownException",
-                    socketConnected = false,
-                    detail = error?.message
-                )
-            _state.value = _state.value.copy(
-                isProbing = false,
-                errorMessage = error?.message ?: "Failed to reach router",
-                diagnostic = diag
-            )
+            applyProbeFailure(result.exceptionOrNull())
         }
+    }
+
+    /** Probes candidate endpoints in order (HTTPS then HTTP) and opens approval on the first reachable one. */
+    suspend fun probeCandidates(candidates: List<String>) {
+        val ordered = candidates
+            .mapNotNull { normalizeRouterAddress(it) }
+            .distinct()
+            .ifEmpty { listOf("https://192.168.1.1", "http://192.168.1.1") }
+
+        _state.value = _state.value.copy(
+            isProbing = true,
+            errorMessage = null,
+            diagnostic = null
+        )
+
+        var lastError: Throwable? = null
+        for (candidate in ordered) {
+            _state.value = _state.value.copy(address = candidate)
+            val result = sessionManager.probeCertificate(candidate)
+            if (result.isSuccess) {
+                applyProbeSuccess(candidate, result.getOrNull() ?: "")
+                return
+            }
+            lastError = result.exceptionOrNull()
+        }
+        _state.value = _state.value.copy(address = ordered.first())
+        applyProbeFailure(lastError)
+    }
+
+    private fun applyProbeSuccess(address: String, fingerprint: String) {
+        val isHttp = fingerprint == RouterDisplay.HTTP_NO_PIN || address.startsWith("http://", ignoreCase = true)
+        _state.value = _state.value.copy(
+            address = address,
+            isProbing = false,
+            discoveredFingerprint = fingerprint,
+            isHttp = isHttp,
+            showApprovalDialog = true,
+            errorMessage = null,
+            diagnostic = null
+        )
+    }
+
+    private fun applyProbeFailure(error: Throwable?) {
+        val diag = (error as? ProbeException)?.diagnostic
+            ?: ProbeDiagnostic(
+                exceptionClass = error?.javaClass?.name ?: "UnknownException",
+                socketConnected = false,
+                detail = error?.message
+            )
+        _state.value = _state.value.copy(
+            isProbing = false,
+            errorMessage = error?.message ?: "Failed to reach router",
+            diagnostic = diag
+        )
     }
 }

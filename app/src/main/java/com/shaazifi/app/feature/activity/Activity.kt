@@ -73,11 +73,19 @@ object DeviceCache {
 
     fun forget(cache: Map<String, CachedRouterDevices>, routerId: String) = cache - routerId
 
-    /** Router name and device, matching name, address or hardware address; all when [q] is blank. */
-    fun search(cache: Map<String, CachedRouterDevices>, q: String): List<Pair<String, CachedDevice>> {
+    /** Router name and device, matching name, address, hardware address or optional maker; all when [q] is blank. */
+    fun search(
+        cache: Map<String, CachedRouterDevices>,
+        q: String,
+        makerOf: (String) -> String? = { null }
+    ): List<Pair<String, CachedDevice>> {
         val t = q.trim()
         return cache.values.flatMap { r -> r.devices.map { r.routerName to it } }.filter { (_, d) ->
-            t.isEmpty() || d.name.contains(t, true) || d.ip.contains(t) || d.mac.contains(t, true)
+            t.isEmpty() ||
+                d.name.contains(t, true) ||
+                d.ip.contains(t) ||
+                d.mac.contains(t, true) ||
+                makerOf(d.mac)?.contains(t, true) == true
         }.sortedWith(compareByDescending<Pair<String, CachedDevice>> { it.second.online }.thenBy { it.second.name.lowercase() })
     }
 

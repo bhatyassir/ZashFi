@@ -1,10 +1,12 @@
 package com.shaazifi.app.debug
 
+import androidx.compose.runtime.Composable
+import com.shaazifi.app.AppContainer
 import com.shaazifi.app.core.net.TrustStore
 
 /**
  * Release-variant stub.
- * Production release builds strictly contain no test router coordinates or fingerprints.
+ * Production release builds strictly contain no test router coordinates, fingerprints, or self-test UI.
  */
 object DebugRouterConfig {
     const val IS_DEBUG: Boolean = false
@@ -16,5 +18,9 @@ object DebugRouterConfig {
     fun seedDebugPins(trustStore: TrustStore) {
         // No-op in release builds
     }
-}
 
+    @Composable
+    fun SelfTestOverlay(container: AppContainer, onBack: () -> Unit) {
+        // No-op in release builds
+    }
+}

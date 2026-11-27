@@ -70,6 +70,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.password
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -107,17 +109,23 @@ fun AdGuardScreen(
 
     var passwordInput by remember { mutableStateOf("") }
     var showPasswordDialog by remember { mutableStateOf(false) }
+    var passwordPromptDismissed by remember { mutableStateOf(false) }
     var rememberPassword by remember { mutableStateOf(false) }
     var hasSaved by remember { mutableStateOf(false) }
     var savedMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(savedPassword) { hasSaved = savedPassword?.let { runCatching { it.has() }.getOrDefault(false) } ?: false }
+    LaunchedEffect(uiState) {
+        if (uiState !is AdGuardUiState.WrongPassword) {
+            passwordPromptDismissed = false
+        }
+    }
     val canSave = savedPassword?.usable == true
 
     LaunchedEffect(stateHolder) {
         stateHolder.pollWhileActive()
     }
 
-    // Confirmation Dialog for state changes (Protection, Safe Browsing)
+    // Confirmation Dialog for state changes (Protection, Safe Browsing, Parental)
     if (pendingConfirmation != null) {
         val conf = pendingConfirmation!!
         AlertDialog(
@@ -127,6 +135,7 @@ fun AdGuardScreen(
                     text = when (conf) {
                         is PendingConfirmation.ProtectionToggle -> conf.title
                         is PendingConfirmation.SafeBrowsingToggle -> conf.title
+                        is PendingConfirmation.ParentalToggle -> conf.title
                     },
                     fontWeight = FontWeight.Bold
                 )
@@ -136,6 +145,7 @@ fun AdGuardScreen(
                     text = when (conf) {
                         is PendingConfirmation.ProtectionToggle -> conf.message
                         is PendingConfirmation.SafeBrowsingToggle -> conf.message
+                        is PendingConfirmation.ParentalToggle -> conf.message
                     }
                 )
             },
@@ -162,12 +172,24 @@ fun AdGuardScreen(
 
     // Password input dialog when authentication fails (HTTP 401)
     // With a saved password, the card offers "Use saved password" first instead of opening this dialog.
-    if (showPasswordDialog || (uiState is AdGuardUiState.WrongPassword && !(hasSaved && canSave))) {
+    val autoPromptForWrongPassword = uiState is AdGuardUiState.WrongPassword && !(hasSaved && canSave) && !passwordPromptDismissed
+    if (showPasswordDialog || autoPromptForWrongPassword) {
+        val wrongPasswordMessage = (uiState as? AdGuardUiState.WrongPassword)?.message
+        val dismissPasswordDialog = {
+            showPasswordDialog = false
+            passwordPromptDismissed = true
+            passwordInput = ""
+            rememberPassword = false
+        }
         AlertDialog(
-            onDismissRequest = { showPasswordDialog = false },
+            onDismissRequest = dismissPasswordDialog,
             title = { Text("AdGuard Home Sign In", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
+                    if (!wrongPasswordMessage.isNullOrBlank()) {
+                        Text(wrongPasswordMessage, style = SfText.sub, color = SfTheme.colors.bad)
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
                     Text("Enter administrator password for AdGuard Home:")
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
@@ -175,8 +197,9 @@ fun AdGuardScreen(
                         onValueChange = { passwordInput = it },
                         label = { Text("Password") },
                         visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().semantics { password() }
                     )
                     if (canSave) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -190,13 +213,16 @@ fun AdGuardScreen(
                 Button(
                     onClick = {
                         val typed = passwordInput
+                        val shouldRemember = rememberPassword
                         stateHolder.setPassword(typed)
                         passwordInput = ""
+                        rememberPassword = false
                         showPasswordDialog = false
+                        passwordPromptDismissed = false
                         coroutineScope.launch {
                             stateHolder.refresh()
                             // Save only a password AdGuard accepted.
-                            if (rememberPassword && canSave && stateHolder.state.value !is AdGuardUiState.WrongPassword) {
+                            if (shouldRemember && canSave && stateHolder.state.value is AdGuardUiState.Loaded) {
                                 savedMessage = savedPassword?.save(typed) ?: "AdGuard password saved."
                                 hasSaved = savedPassword?.let { runCatching { it.has() }.getOrDefault(false) } ?: false
                             }
@@ -207,7 +233,7 @@ fun AdGuardScreen(
                 }
             },
             dismissButton = {
-                OutlinedButton(onClick = { showPasswordDialog = false }) {
+                OutlinedButton(onClick = dismissPasswordDialog) {
                     Text("Cancel")
                 }
             }
@@ -364,6 +390,7 @@ fun AdGuardScreen(
                     onProtectionToggle = { enabled -> stateHolder.requestProtectionToggle(enabled) },
                     onPauseTenMinutes = { stateHolder.requestProtectionToggle(enabled = false, durationMs = 600000L) },
                     onSafeBrowsingToggle = { enabled -> stateHolder.requestSafeBrowsingToggle(enabled) },
+                    onParentalToggle = { enabled -> stateHolder.requestParentalToggle(enabled) },
                     onOpenQueryLog = onOpenQueryLog,
                     onOpenPage = onOpenPage
                 )
@@ -375,6 +402,7 @@ fun AdGuardScreen(
                     onProtectionToggle = { enabled -> stateHolder.requestProtectionToggle(enabled) },
                     onPauseTenMinutes = { stateHolder.requestProtectionToggle(enabled = false, durationMs = 600000L) },
                     onSafeBrowsingToggle = { enabled -> stateHolder.requestSafeBrowsingToggle(enabled) },
+                    onParentalToggle = { enabled -> stateHolder.requestParentalToggle(enabled) },
                     onOpenQueryLog = onOpenQueryLog,
                     onOpenPage = onOpenPage
                 )
@@ -523,6 +551,12 @@ private fun Meter(fraction: Float) {
     }
 }
 
+private fun formatPausedDuration(durationMs: Long): String {
+    if (durationMs < 60_000L) return "Paused for < 1 min"
+    val mins = durationMs / 60_000L
+    return if (mins == 1L) "Paused for 1 more minute" else "Paused for $mins more minutes"
+}
+
 /** AdGuard Home dashboard laid out as in the approved mock (screen 8). */
 @Composable
 private fun AdGuardDashboardContent(
@@ -531,6 +565,7 @@ private fun AdGuardDashboardContent(
     onProtectionToggle: (Boolean) -> Unit,
     onPauseTenMinutes: () -> Unit,
     onSafeBrowsingToggle: (Boolean) -> Unit,
+    onParentalToggle: (Boolean) -> Unit,
     onOpenQueryLog: (AdGuardQueryEntry) -> Unit,
     onOpenPage: (String) -> Unit = {}
 ) {
@@ -557,7 +592,7 @@ private fun AdGuardDashboardContent(
                     Text(if (status.protectionEnabled) "Pause protection" else "Enable protection")
                 }
             }
-            if (paused) Text("Paused for ${status.protectionDisabledDurationMs / 60000} more minutes", style = SfText.sub, color = c.warn)
+            if (paused) Text(formatPausedDuration(status.protectionDisabledDurationMs), style = SfText.sub, color = c.warn)
             if (status.protectionEnabled) PageLink("Pause 10 min", onPauseTenMinutes)
         }
         val statsEnabled = dashboard.statsConfig.enabled
@@ -666,13 +701,15 @@ private fun AdGuardDashboardContent(
         }
 
         val safeBrowsing = dashboard.safeBrowsingEnabled
+        val parental = dashboard.parentalEnabled
         SfList {
             SfListRow("Safe browsing", subtitle = when (safeBrowsing) { true -> "On"; false -> "Off"; null -> "Unavailable" },
                 icon = SfIcons.Shield, hue = SfHue.GREEN,
                 onClick = safeBrowsing?.let { { onSafeBrowsingToggle(!it) } })
             SfDivider()
-            SfListRow("Parental filter", subtitle = when (dashboard.parentalEnabled) { true -> "On"; false -> "Off"; null -> "Unavailable" },
-                icon = SfIcons.Lock, hue = SfHue.VIOLET)
+            SfListRow("Parental filter", subtitle = when (parental) { true -> "On"; false -> "Off"; null -> "Unavailable" },
+                icon = SfIcons.Lock, hue = SfHue.VIOLET,
+                onClick = parental?.let { { onParentalToggle(!it) } })
         }
 
         if (stats.topBlockedDomains.isNotEmpty()) {

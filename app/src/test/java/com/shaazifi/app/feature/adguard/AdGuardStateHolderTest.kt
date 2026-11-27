@@ -2,6 +2,7 @@ package com.shaazifi.app.feature.adguard
 
 import com.shaazifi.app.core.adguard.AdGuardError
 import com.shaazifi.app.data.AdGuardRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -200,5 +201,79 @@ class AdGuardStateHolderTest {
         testHolder.dismissPendingAction()
         assertNull(testHolder.pendingConfirmation.value)
         assertEquals(0, writesExecuted)
+    }
+
+    @Test
+    fun confirmPendingActionCatchesAuthAndNetworkErrorsWithoutCrashing() = runBlocking {
+        var throwError: Exception = AdGuardError.Unauthorized("Bad creds")
+        val repo = object : AdGuardRepository {
+            override suspend fun probe() = true
+            override suspend fun loadDashboard() = AdGuardDashboard(
+                status = AdGuardStatus(protectionEnabled = true),
+                stats = AdGuardStats(),
+                statsConfig = AdGuardStatsConfig(),
+                filtering = AdGuardFilteringStatus(),
+                safeSearch = AdGuardSafeSearchStatus(),
+                safeBrowsingEnabled = true,
+                parentalEnabled = false
+            )
+            override suspend fun loadQueryLog(limit: Int, offset: Int, search: String?) = AdGuardQueryLog()
+            override suspend fun setProtection(enabled: Boolean, durationMs: Long?) { throw throwError }
+            override suspend fun setSafeBrowsing(enabled: Boolean) { throw throwError }
+            override suspend fun setParental(enabled: Boolean) { throw throwError }
+        }
+
+        val testHolder = AdGuardStateHolder(repository = repo)
+        testHolder.refresh()
+
+        testHolder.requestProtectionToggle(enabled = false)
+        testHolder.confirmPendingAction()
+        assertTrue(testHolder.state.value is AdGuardUiState.WrongPassword)
+
+        throwError = AdGuardError.RateLimited(retryAfterSeconds = 45)
+        testHolder.requestSafeBrowsingToggle(enabled = false)
+        testHolder.confirmPendingAction()
+        assertTrue(testHolder.state.value is AdGuardUiState.RateLimited)
+
+        throwError = AdGuardError.Unreachable("Timed out")
+        testHolder.requestParentalToggle(enabled = true)
+        testHolder.confirmPendingAction()
+        assertTrue(testHolder.state.value is AdGuardUiState.RouterUnreachable)
+    }
+
+    @Test
+    fun confirmPendingActionPropagatesCancellationException() = runBlocking {
+        val repo = object : AdGuardRepository {
+            override suspend fun probe() = true
+            override suspend fun loadDashboard() = AdGuardDashboard(
+                status = AdGuardStatus(protectionEnabled = true),
+                stats = AdGuardStats(),
+                statsConfig = AdGuardStatsConfig(),
+                filtering = AdGuardFilteringStatus(),
+                safeSearch = AdGuardSafeSearchStatus()
+            )
+            override suspend fun loadQueryLog(limit: Int, offset: Int, search: String?) = AdGuardQueryLog()
+            override suspend fun setProtection(enabled: Boolean, durationMs: Long?) {
+                throw CancellationException("Cancelled")
+            }
+            override suspend fun setSafeBrowsing(enabled: Boolean) {}
+        }
+
+        val testHolder = AdGuardStateHolder(repository = repo)
+        testHolder.requestProtectionToggle(enabled = false)
+        val result = runCatching { testHolder.confirmPendingAction() }
+        assertTrue(result.exceptionOrNull() is CancellationException)
+    }
+
+    @Test
+    fun parentalToggleUpdatesServerAndDemoRepository() = runBlocking {
+        val demoHolder = AdGuardStateHolder(repository = demoRepo, isDemo = true)
+        demoHolder.refresh()
+        assertEquals(false, (demoHolder.state.value as AdGuardUiState.DemoData).dashboard.parentalEnabled)
+
+        demoHolder.requestParentalToggle(enabled = true)
+        assertTrue(demoHolder.pendingConfirmation.value is PendingConfirmation.ParentalToggle)
+        demoHolder.confirmPendingAction()
+        assertEquals(true, (demoHolder.state.value as AdGuardUiState.DemoData).dashboard.parentalEnabled)
     }
 }

@@ -1,7 +1,10 @@
 package com.shaazifi.app.feature.widget
 
+import com.shaazifi.app.feature.alerts.AlertNotifier
+import com.shaazifi.app.feature.quick.QuickAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,5 +58,14 @@ class RouterWidgetTest {
         assertTrue(manifest.contains("android:resource=\"@xml/router_widget_info\""))
         val info = File(main, "res/xml/router_widget_info.xml").readText()
         assertTrue("the app pushes updates; the system never wakes it", info.contains("android:updatePeriodMillis=\"0\""))
+    }
+
+    @Test
+    fun widgetActionAndRequestCodeAreDistinct() {
+        assertNotEquals(RouterWidget.ACTION_WIDGET, AlertNotifier.ACTION_ALERT)
+        QuickAction.entries.forEach { action ->
+            assertNotEquals(RouterWidget.ACTION_WIDGET, action.intentAction())
+            assertNotEquals(RouterWidget.REQUEST_CODE, action.requestCode)
+        }
     }
 }

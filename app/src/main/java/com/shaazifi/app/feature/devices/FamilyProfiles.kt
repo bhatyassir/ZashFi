@@ -133,10 +133,11 @@ internal object FamilyChanges {
 
     fun addSchedule(profile: FamilyProfile, days: String, from: String, until: String): PlanResult {
         val first = profile.members.firstOrNull() ?: return PlanResult.Invalid("Assign a device before adding a schedule.")
-        val validated = FeatureChanges.parentalSchedule(first.mac, days, from, until, mapOf(first.mac to profile.label))
+        val validated = validateScheduleTimes(
+            FeatureChanges.parentalSchedule(first.mac, days, from, until, mapOf(first.mac to profile.label))
+        )
         if (validated !is PlanResult.Ready) return validated
         val values = (validated.plan.ops.single() as UciOp.Add).values
-        if (values["start_time"] == values["stop_time"]) return PlanResult.Invalid("Choose different start and end times.")
         val template = first.copy(days = values["weekdays"] as? String ?: "",
             from = values.getValue("start_time").toString(), until = values.getValue("stop_time").toString())
         val id = "schedule-${newFamilyId()}"
@@ -154,11 +155,15 @@ internal object FamilyChanges {
         return plan("$action schedule for ${profile.label}?", listOf(ChangeLine("Schedule", "", action)), ops)
     }
 
-    fun removeMember(profile: FamilyProfile, mac: String, label: String): PlanResult =
-        plan("Remove $label from ${profile.label}?", listOf(ChangeLine(label, profile.label, "Unassigned")),
-            profile.rules.filter { it.mac == mac }.map { UciOp.Delete("firewall", it.id) },
-            if (profile.macs.size == 1) "Removing the last device also removes this profile. Individual device rules still apply."
+    fun removeMember(profile: FamilyProfile, mac: String, label: String): PlanResult {
+        val lastMember = profile.macs.size == 1 && mac in profile.macs
+        val ops = if (lastMember) profile.rules.map { UciOp.Delete("firewall", it.id) }
+        else profile.rules.filter { it.mac == mac }.map { UciOp.Delete("firewall", it.id) }
+        return plan("Remove $label from ${profile.label}?", listOf(ChangeLine(label, profile.label, "Unassigned")),
+            ops,
+            if (lastMember) "Removing the last device also removes this profile. Individual device rules still apply."
             else "Individual device rules still apply.")
+    }
 
     fun deleteProfile(profile: FamilyProfile): PlanResult =
         plan("Remove ${profile.label}?", listOf(ChangeLine(profile.label, "Family profile", "Removed")),

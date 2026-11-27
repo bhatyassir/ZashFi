@@ -26,6 +26,10 @@ class DeviceChangesTest {
         assertTrue((op.values["name"] as String).startsWith("Block:"))
         assertTrue(p.reloadFirewall)
         assertEquals("Blocked", p.lines.single().after)
+
+        val guestDevice = tablet.copy(network = DeviceNetwork("guest", "192.168.10.0/24", "guest"))
+        val guestOp = plan(DeviceChanges.block(guestDevice)).ops.single() as UciOp.Add
+        assertEquals("guest", guestOp.values["src"])
     }
 
     @Test
@@ -58,9 +62,15 @@ class DeviceChangesTest {
     }
 
     @Test
-    fun removingTheFixedAddressDeletesItsEntry() {
+    fun removingTheFixedAddressDeletesItsEntryOrOnlyIpWhenCustomNameExists() {
         val existing = tablet.copy(fixedIp = "192.168.1.57", reserveId = "cfg11")
         assertEquals(UciOp.Delete("dhcp", "cfg11"), plan(DeviceChanges.removeFixedIp(existing)).ops.single())
+
+        val renamedAndFixed = existing.copy(customName = "Kids-Tablet")
+        assertEquals(UciOp.DeleteOption("dhcp", "cfg11", "ip"), plan(DeviceChanges.removeFixedIp(renamedAndFixed)).ops.single())
+
+        val renamedOnly = tablet.copy(reserveId = "cfg11", fixedIp = null, customName = "Kids-Tablet")
+        assertTrue(DeviceChanges.removeFixedIp(renamedOnly) is DeviceChangeResult.Invalid)
         assertTrue(DeviceChanges.removeFixedIp(tablet) is DeviceChangeResult.Invalid)
     }
 

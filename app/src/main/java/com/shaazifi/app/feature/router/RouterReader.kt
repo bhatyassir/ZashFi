@@ -12,14 +12,28 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import java.io.IOException
+import java.util.Locale
 
 /** Why a feature screen could not be read. Maps onto the six screen states. */
-sealed class FeatureLoadException(message: String) : Exception(message) {
+sealed class FeatureLoadException(message: String, cause: Throwable? = null) : Exception(message, cause) {
     class SessionExpired : FeatureLoadException("Session expired")
     class NotPermitted : FeatureLoadException("Not permitted")
     class NotInstalled : FeatureLoadException("Not installed")
-    class Unreachable : FeatureLoadException("Router unreachable")
+    class Unreachable(cause: Throwable? = null) : FeatureLoadException("Router unreachable", cause)
 }
+
+/** One temperature reading from `/sys/class/hwmon` or `/sys/class/thermal`. */
+data class ThermalSensor(
+    val id: String,
+    val rawName: String,
+    val label: String,
+    val tempCelsius: Double,
+    val maxCelsius: Double? = null,
+    val critCelsius: Double? = null
+)
+
+/** Hardware/software flow offloading flags from UCI `firewall` `@defaults`. */
+data class FlowOffloadingStatus(val software: Boolean, val hardware: Boolean)
 
 /** One section of a UCI config: `.type`, `.name` and options (single values become one-item lists). */
 data class UciSection(val id: String, val type: String, val options: Map<String, List<String>>) {
@@ -75,7 +89,8 @@ class RouterReader(private val caller: UbusCaller) {
         /** UCI configs the feature screens may read. `uci get` only, never set/add/delete/apply. */
         val UCI_CONFIGS = setOf(
             "dhcp", "firewall", "network", "ddns", "mwan3", "upnpd", "sqm", "openvpn",
-            "system", "uhttpd", "minidlna", "ksmbd", "samba4", "adblock", "banip"
+            "system", "uhttpd", "minidlna", "ksmbd", "samba4", "adblock", "banip", "nlbwmon",
+            "adguardhome", "wireless"
         )
 
         private val FIXED_READS = setOf(
@@ -107,8 +122,28 @@ class RouterReader(private val caller: UbusCaller) {
         val FILE_READS = setOf(
             "/proc/mounts", "/proc/stat",
             // Owner feedback 2026-11-18: live upload/download per device (the file LuCI's connection list reads).
-            "/proc/net/nf_conntrack"
+            "/proc/net/nf_conntrack",
+            // LuCI System > Scheduled Tasks. Read-only: the editor is not implemented here.
+            "/etc/crontabs/root"
         )
+
+        /** Sysfs directories that may be listed for temperature sensors. */
+        val FILE_LISTS = setOf("/sys/class/hwmon", "/sys/class/thermal")
+
+        private val HWMON_READ_REGEX =
+            Regex("^/sys/class/hwmon/hwmon[0-9]{1,2}/(name|temp[1-8]_(input|label|max|crit))$")
+        private val THERMAL_ZONE_READ_REGEX =
+            Regex("^/sys/class/thermal/thermal_zone[0-9]{1,2}/(type|temp)$")
+        private val HWMON_DIR_REGEX = Regex("^hwmon[0-9]{1,2}$")
+        private val THERMAL_ZONE_DIR_REGEX = Regex("^thermal_zone[0-9]{1,2}$")
+
+        fun isAllowedThermalReadPath(path: String): Boolean =
+            HWMON_READ_REGEX.matches(path) || THERMAL_ZONE_READ_REGEX.matches(path)
+
+        fun isAllowedFileRead(path: String): Boolean =
+            path in FILE_READS || isAllowedThermalReadPath(path)
+
+        fun isAllowedFileList(path: String): Boolean = path in FILE_LISTS
 
         /**
          * Commands that only print information. Exactly these, with exactly these arguments,
@@ -119,10 +154,18 @@ class RouterReader(private val caller: UbusCaller) {
             "/usr/sbin/nlbw" to listOf("-c", "json", "-g", "ip,mac", "-o", "rx_bytes"),
             "/usr/sbin/tailscale" to listOf("status", "--json"),
             "/usr/bin/tailscale" to listOf("status", "--json"),
+            "/usr/bin/apk" to listOf("info"),
             "/usr/bin/apk" to listOf("list", "-I"),
             "/bin/opkg" to listOf("list-installed"),
             // Kernel log as LuCI reads it (status/dmesg.js).
-            "/bin/dmesg" to listOf("-r")
+            "/bin/dmesg" to listOf("-r"),
+            // Read-only status pages from LuCI's Status menu.
+            "/bin/ps" to listOf("-w"),
+            "/sbin/ip" to listOf("-4", "route", "show"),
+            "/sbin/ip" to listOf("-6", "route", "show"),
+            "/usr/sbin/nft" to listOf("list", "ruleset"),
+            // LED night-mode status (the write actions are in RouterWriter.SERVICES).
+            "/usr/bin/led-nightmode" to listOf("check")
         )
 
         const val LOG_LINES = 200
@@ -138,7 +181,11 @@ class RouterReader(private val caller: UbusCaller) {
                 }
                 "file" to "read" -> {
                     val path = (args["path"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                    return args.size == 1 && path != null && path in FILE_READS
+                    return args.size == 1 && path != null && isAllowedFileRead(path)
+                }
+                "file" to "list" -> {
+                    val path = (args["path"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    return args.size == 1 && path != null && isAllowedFileList(path)
                 }
                 "file" to "exec" -> {
                     val command = (args["command"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return false
@@ -181,9 +228,114 @@ class RouterReader(private val caller: UbusCaller) {
          * marks the first call of a screen, where access denied means the session ended.
          */
         fun classify(e: IOException, sessionGate: Boolean): FeatureLoadException = when {
-            isConnectionProblem(e) -> FeatureLoadException.Unreachable()
+            isConnectionProblem(e) -> FeatureLoadException.Unreachable(e)
             e is UbusError.AccessDenied -> if (sessionGate) FeatureLoadException.SessionExpired() else FeatureLoadException.NotPermitted()
             else -> FeatureLoadException.NotInstalled()
+        }
+
+        internal fun friendlyThermalLabel(rawName: String, channelLabel: String? = null): String {
+            val norm = rawName.trim().lowercase(Locale.ROOT)
+            val base = when {
+                norm == "cpu_thermal" || norm == "cpu-thermal" || norm == "soc_thermal" || norm == "soc-thermal" ||
+                    norm == "x86_pkg_temp" || norm == "coretemp" || norm == "k10temp" || norm == "acpitz" ||
+                    norm.startsWith("cpu") -> "CPU / SoC"
+                norm == "mt7915_phy0" || norm == "mt7986_phy0" || norm == "phy0" || norm.endsWith("_phy0") -> "2.4 GHz Wi-Fi"
+                norm == "mt7915_phy1" || norm == "mt7986_phy1" || norm == "phy1" || norm.endsWith("_phy1") -> "5 GHz Wi-Fi"
+                norm == "mt7915_phy2" || norm == "mt7986_phy2" || norm == "phy2" || norm.endsWith("_phy2") -> "6 GHz Wi-Fi"
+                norm == "iwlwifi_1" -> "Wi-Fi"
+                norm == "nvme" -> "NVMe SSD"
+                norm == "drivetemp" -> "Drive"
+                else -> null
+            }
+            val cleanChan = channelLabel?.trim()?.takeIf { it.isNotEmpty() }
+            return when {
+                base != null && cleanChan != null && !cleanChan.equals(rawName, ignoreCase = true) -> "$base ($cleanChan)"
+                base != null -> base
+                cleanChan != null -> cleanChan
+                else -> rawName.trim().ifEmpty { "Sensor" }
+            }
+        }
+
+        private fun parseMillidegreesCelsius(text: String?): Double? {
+            val raw = text?.trim()?.toDoubleOrNull() ?: return null
+            if (!raw.isFinite()) return null
+            val celsius = raw / 1000.0
+            return celsius.takeIf { it in -50.0..200.0 }
+        }
+
+        private fun isCpuLabel(label: String): Boolean = label == "CPU / SoC"
+
+        internal suspend fun readThermalsWith(
+            listDir: suspend (String) -> List<String>?,
+            readFile: suspend (String) -> String?
+        ): List<ThermalSensor> {
+            val hwmonDir = listDir("/sys/class/hwmon")
+            val hwmonNames = if (hwmonDir != null) {
+                hwmonDir.filter { HWMON_DIR_REGEX.matches(it) }
+                    .sortedBy { it.removePrefix("hwmon").toIntOrNull() ?: Int.MAX_VALUE }
+            } else {
+                listOf("hwmon0", "hwmon1", "hwmon2", "hwmon3")
+            }
+
+            val hwmonSensors = mutableListOf<ThermalSensor>()
+            for (hwmon in hwmonNames) {
+                val base = "/sys/class/hwmon/$hwmon"
+                val firstTemp = parseMillidegreesCelsius(readFile("$base/temp1_input")) ?: continue
+                val rawName = readFile("$base/name")?.trim()?.takeIf { it.isNotEmpty() } ?: hwmon
+                for (ch in 1..8) {
+                    val tempC = if (ch == 1) firstTemp else parseMillidegreesCelsius(readFile("$base/temp${ch}_input")) ?: break
+                    val chanLabel = readFile("$base/temp${ch}_label")?.trim()?.takeIf { it.isNotEmpty() }
+                    val maxC = parseMillidegreesCelsius(readFile("$base/temp${ch}_max"))?.takeIf { it > 0.0 }
+                    val critC = parseMillidegreesCelsius(readFile("$base/temp${ch}_crit"))?.takeIf { it > 0.0 }
+                    hwmonSensors += ThermalSensor(
+                        id = if (ch == 1) hwmon else "$hwmon:temp$ch",
+                        rawName = rawName,
+                        label = friendlyThermalLabel(rawName, chanLabel),
+                        tempCelsius = tempC,
+                        maxCelsius = maxC,
+                        critCelsius = critC
+                    )
+                }
+            }
+
+            if (hwmonSensors.isNotEmpty() && hwmonSensors.any { isCpuLabel(it.label) }) {
+                return hwmonSensors
+            }
+
+            val tzDir = listDir("/sys/class/thermal")
+            val tzNames = if (tzDir != null) {
+                tzDir.filter { THERMAL_ZONE_DIR_REGEX.matches(it) }
+                    .sortedBy { it.removePrefix("thermal_zone").toIntOrNull() ?: Int.MAX_VALUE }
+            } else {
+                listOf("thermal_zone0", "thermal_zone1", "thermal_zone2", "thermal_zone3")
+            }
+
+            val tzSensors = mutableListOf<ThermalSensor>()
+            for (zone in tzNames) {
+                val base = "/sys/class/thermal/$zone"
+                val tempC = parseMillidegreesCelsius(readFile("$base/temp")) ?: continue
+                val rawType = readFile("$base/type")?.trim()?.takeIf { it.isNotEmpty() } ?: zone
+                tzSensors += ThermalSensor(
+                    id = zone,
+                    rawName = rawType,
+                    label = friendlyThermalLabel(rawType),
+                    tempCelsius = tempC
+                )
+            }
+
+            if (hwmonSensors.isEmpty()) return tzSensors
+
+            // Deduplicate CPU sensor if both hwmon and thermal_zone report one; prefer hwmon.
+            val seenCpu = hwmonSensors.any { isCpuLabel(it.label) }
+            val extra = if (seenCpu) tzSensors.filterNot { isCpuLabel(it.label) } else {
+                var keptCpu = false
+                tzSensors.filter { s ->
+                    if (!isCpuLabel(s.label)) true
+                    else if (!keptCpu) { keptCpu = true; true }
+                    else false
+                }
+            }
+            return hwmonSensors + extra
         }
     }
 
@@ -197,6 +349,16 @@ class RouterReader(private val caller: UbusCaller) {
         try {
             send(ubusObject, method, args)
         } catch (e: IOException) {
+            if (!sessionGate && (e is UbusError.AccessDenied || e is UbusError.SessionExpired)) {
+                try {
+                    send("system", "board", buildJsonObject {})
+                } catch (gateErr: IOException) {
+                    if (isConnectionProblem(gateErr)) throw FeatureLoadException.Unreachable(gateErr)
+                    if (gateErr is UbusError.AccessDenied || gateErr is UbusError.SessionExpired) {
+                        throw FeatureLoadException.SessionExpired()
+                    }
+                }
+            }
             throw classify(e, sessionGate)
         }
 
@@ -219,6 +381,27 @@ class RouterReader(private val caller: UbusCaller) {
     suspend fun readFile(path: String): String? {
         val reply = optional("file", "read", buildJsonObject { put("path", path) }) ?: return null
         return (reply["data"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    }
+
+    suspend fun listDir(path: String): List<String>? {
+        val reply = optional("file", "list", buildJsonObject { put("path", path) }) ?: return null
+        val entries = reply["entries"] as? JsonArray ?: return emptyList()
+        return entries.mapNotNull { entry ->
+            ((entry as? JsonObject)?.get("name") as? JsonPrimitive)?.takeIf { it.isString }?.content
+        }
+    }
+
+    /** Reads hardware/thermal temperature sensors from sysfs, or empty list if unavailable. */
+    suspend fun readThermals(): List<ThermalSensor> = readThermalsWith(::listDir, ::readFile)
+
+    /** Reads software/hardware flow offloading flags from UCI `firewall` `@defaults`. */
+    suspend fun readFlowOffloading(): FlowOffloadingStatus? {
+        val firewall = uci("firewall", required = false) ?: return null
+        val defaults = firewall.ofType("defaults").firstOrNull() ?: return null
+        return FlowOffloadingStatus(
+            software = defaults.flag("flow_offloading"),
+            hardware = defaults.flag("flow_offloading_hw")
+        )
     }
 
     /** Runs one of [EXEC_READS]. Null when the command is missing or not permitted on the router. */

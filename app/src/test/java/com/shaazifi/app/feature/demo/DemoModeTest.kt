@@ -30,6 +30,7 @@ class DemoModeTest {
             assertFalse(DemoMode.pageAvailable(MorePage.RouterPages(webUi, "devices")))
         }
         assertFalse(DemoMode.pageAvailable(MorePage.Settings))
+        assertFalse(DemoMode.pageAvailable(MorePage.AllDevices))
         // AdGuard is a bottom tab since 2026-11-18 (owner); it works in the demo (DemoModeTest above).
         assertTrue(DemoMode.pageAvailable(MorePage.Diagnostics))
         assertTrue(DemoMode.pageAvailable(MorePage.Feature("wan")))

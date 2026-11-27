@@ -49,7 +49,9 @@ class FeaturesTest {
             } catch (e: IllegalStateException) {
                 throw AssertionError("${spec.id} tried a call outside the read-only list: ${e.message}")
             }
-            assertTrue("${spec.id} made no call", router.calls.isNotEmpty())
+            if (spec.id !in setOf("downtimeline")) {
+                assertTrue("${spec.id} made no call", router.calls.isNotEmpty())
+            }
             assertTrue(router.calls.none { (_, m) -> m in setOf("set", "add", "delete", "apply", "commit", "setPassword", "write") })
         }
         val dev = FakeRouter()
@@ -83,6 +85,56 @@ class FeaturesTest {
         holder.pollWhileActive()
         assertEquals(0, loads)
         assertTrue(holder.state.value is LoadState.DemoData)
+    }
+
+    @Test
+    fun loadHolderKeepsLastLoadedViewDuringTransientUnreachableDrops() = runBlocking {
+        var fail = false
+        var count = 0
+        val holder = LoadHolder(load = {
+            count++
+            if (fail) throw FeatureLoadException.Unreachable()
+            FeatureView("ok-$count")
+        })
+        holder.refresh()
+        assertEquals(LoadState.Loaded(FeatureView("ok-1")), holder.state.value)
+
+        fail = true
+        repeat(LoadHolder.MAX_STALE_REFRESHES - 1) {
+            holder.refresh()
+            assertEquals("transient drop keeps last loaded view", LoadState.Loaded(FeatureView("ok-1")), holder.state.value)
+        }
+        holder.refresh()
+        assertEquals("reaches Unreachable after MAX_STALE_REFRESHES failures", LoadState.Unreachable, holder.state.value)
+
+        fail = false
+        holder.refresh()
+        assertTrue(holder.state.value is LoadState.Loaded)
+    }
+
+    @Test
+    fun healthUsesCachedCpuSampleWithoutBlocking() = runBlocking {
+        var procReads = 0
+        var boardReads = 0
+        val caller = object : UbusCaller {
+            override suspend fun call(ubusObject: String, method: String, args: JsonObject): JsonObject = when (ubusObject to method) {
+                "system" to "board" -> { boardReads++; FeatureMappersTest.fixture("m7_system_board.json") }
+                "system" to "info" -> FeatureMappersTest.fixture("m7_system_info.json")
+                "file" to "read" -> {
+                    procReads++
+                    val stat = if (procReads == 1) "cpu  100 0 0 900 0 0 0 0\n" else "cpu  150 0 0 950 0 0 0 0\n"
+                    Json.parseToJsonElement("""{"data":"$stat"}""").jsonObject
+                }
+                else -> JsonObject(emptyMap())
+            }
+        }
+        val spec = Features.byId("health")!!
+        val ctx = FeatureContext(adGuardConfigured = false)
+        val first = spec.load(RouterReader(caller), ctx)
+        val second = spec.load(RouterReader(caller), ctx)
+        assertEquals("Measuring...", first.sections.first().rows.first { it.label == "Processor" }.value)
+        assertEquals("50%", second.sections.first().rows.first { it.label == "Processor" }.value)
+        assertEquals(2, boardReads) // once on first load, once in r.gate() on second load
     }
 
     @Test

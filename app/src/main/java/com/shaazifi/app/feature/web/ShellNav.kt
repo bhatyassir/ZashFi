@@ -70,18 +70,17 @@ data class ShellNavState(
         return next.copy(history = (history + screen()).takeLast(MAX_HISTORY))
     }
 
-    /** Selecting a tab. Tapping the current tab again returns to its first screen. */
+    /** Selecting a tab. Tapping the current tab again returns to its first screen. Tab switches do not push back history. */
     private fun clearDetails() = copy(wifiNetwork = null, deviceMac = null, parentalMac = null,
         familyProfileId = null, familyAssignment = null)
 
-    fun select(target: MainTab): ShellNavState = go(
+    fun select(target: MainTab): ShellNavState =
         when {
-            target == tab && target == MainTab.More -> clearDetails().copy(morePage = null)
-            target == MainTab.Wifi -> clearDetails().copy(tab = target, wifiPage = null)
-            target == tab && target == MainTab.AdGuard -> clearDetails().copy(queryLogEntry = null, adGuardPage = null)
-            else -> clearDetails().copy(tab = target)
+            target == tab && target == MainTab.More -> clearDetails().copy(morePage = null, history = emptyList())
+            target == tab && target == MainTab.Wifi -> clearDetails().copy(wifiPage = null, history = emptyList())
+            target == tab && target == MainTab.AdGuard -> clearDetails().copy(queryLogEntry = null, adGuardPage = null, history = emptyList())
+            else -> clearDetails().copy(tab = target, history = emptyList())
         }
-    )
 
     fun openMore(page: MorePage): ShellNavState = go(clearDetails().copy(tab = MainTab.More, morePage = page))
 

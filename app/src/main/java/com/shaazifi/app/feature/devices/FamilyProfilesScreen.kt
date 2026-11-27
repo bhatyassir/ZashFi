@@ -16,6 +16,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -120,6 +121,12 @@ internal fun FamilyProfilesScreen(
                 }
             }
         }
+        if (assigned.any { Makers.isRandomized(it) }) {
+            Note("Some assigned devices use a randomized (private) MAC address. Changing Wi-Fi privacy settings or rotating MACs will bypass MAC-based rules.")
+        }
+        if (assigned.isNotEmpty() || list.extraEgressZones.isNotEmpty()) {
+            Note(egressCaveatText(list.extraEgressZones))
+        }
         GhostButton("Create new profile", onClick = { create = true })
         SfList {
             SfListRow("Assign devices", subtitle = "${unassigned.size} unassigned", icon = SfIcons.Devices, hue = SfHue.BLUE,
@@ -130,6 +137,13 @@ internal fun FamilyProfilesScreen(
         }
     } else {
         val profile = profiles.firstOrNull { it.id == profileId }
+        var sawProfile by remember(profileId) { mutableStateOf(false) }
+        if (profile != null) sawProfile = true
+        LaunchedEffect(profileId, profile == null, access != null, sawProfile) {
+            if (profile == null && access != null && sawProfile) {
+                onDiscard(profileId)
+            }
+        }
         if (profile == null) {
             Note(if (access == null) "Profile rules are unavailable for this router login." else "This profile has been removed.")
         } else {
@@ -144,6 +158,11 @@ internal fun FamilyProfilesScreen(
         onCreate(draft)
     })
 }
+
+private fun egressCaveatText(extraZones: List<String>): String =
+    "Rules match MAC addresses leaving toward the main wan zone. Bridged/relayed IPv6 traffic or egress via other WAN/VPN zones" +
+        (if (extraZones.isNotEmpty()) " (${extraZones.joinToString(", ")})" else "") +
+        " may bypass these rules."
 
 private fun scheduleSummary(profile: FamilyProfile): String? {
     val enabled = profile.schedules.values.mapNotNull { group -> group.firstOrNull { it.enabled } }
@@ -198,12 +217,29 @@ private fun FamilyProfileDetail(
             if (index > 0) SfDivider()
             val device = list.devices.firstOrNull { it.mac == rule.mac }
             val label = device?.name ?: rule.mac
-            SfListRow(label, subtitle = device?.network?.label, icon = SfIcons.Devices, hue = SfHue.BLUE,
+            val randomized = Makers.isRandomized(rule.mac)
+            SfListRow(
+                title = label,
+                subtitle = listOfNotNull(device?.network?.label, if (randomized) "Private MAC" else null).joinToString(" · ").ifBlank { null },
+                icon = SfIcons.Devices,
+                hue = SfHue.BLUE,
                 onClick = device?.let { { onDevice(it.mac) } },
-                trailing = { if (canChange) TextButton(onClick = { request(FamilyChanges.removeMember(profile, rule.mac, label)) }) {
-                    Text("Remove")
-                } })
+                trailing = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (randomized) Pill("Private MAC", PillTone.Warn)
+                        if (canChange) TextButton(onClick = { request(FamilyChanges.removeMember(profile, rule.mac, label)) }) {
+                            Text("Remove")
+                        }
+                    }
+                }
+            )
         }
+    }
+    if (profile.members.any { Makers.isRandomized(it.mac) }) {
+        Note("One or more devices in this profile use a randomized (private) MAC address and can bypass rules if their address rotates.")
+    }
+    if (profile.members.isNotEmpty() || list.extraEgressZones.isNotEmpty()) {
+        Note(egressCaveatText(list.extraEgressZones))
     }
     GhostButton("Assign devices", onClick = onAssign, enabled = canChange && hasUnassigned)
     SectionTitle("Schedules")

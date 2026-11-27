@@ -5,6 +5,8 @@ import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -218,25 +220,118 @@ class TrustStoreTest {
             val url = server2.url("/").newBuilder().host("127.0.0.1").build()
 
             // (b) Must reject server2 because its fingerprint is not pinned for 127.0.0.1
+            // AND must throw UntrustedCertificateException (NOT CertificateChangedException against 192.168.1.1's pin)
             try {
                 client.newCall(Request.Builder().url(url).build()).execute()
                 fail("Expected connection to be rejected because fp2 is not pinned; must never trust-all")
             } catch (e: Exception) {
-                var rejected = false
+                var foundUntrusted = false
+                var foundChanged = false
                 fun inspect(t: Throwable?) {
-                    if (t == null || rejected) return
-                    if (t is CertificateChangedException || t is UntrustedCertificateException || t is javax.net.ssl.SSLPeerUnverifiedException) {
-                        rejected = true
+                    if (t == null) return
+                    if (t is UntrustedCertificateException) foundUntrusted = true
+                    if (t is CertificateChangedException) foundChanged = true
+                    inspect(t.cause)
+                    for (s in t.suppressed) inspect(s)
+                }
+                inspect(e)
+                assertTrue("Unpinned host must fail with UntrustedCertificateException, got $e", foundUntrusted)
+                assertFalse("Unpinned host must never trigger CertificateChangedException against a different host's pin", foundChanged)
+            }
+        } finally {
+            server2.shutdown()
+        }
+    }
+
+    @Test
+    fun testNoCrossHostPinAcceptanceEvenWhenCertFingerprintMatchesAnotherHost() {
+        val (sslFactory, cert) = createThrowawayKeyStoreAndCert("router1", "password")
+        val fp = TrustStore.fingerprint(cert)
+
+        val server = MockWebServer()
+        server.useHttps(sslFactory, false)
+        server.enqueue(MockResponse().setBody("Should not reach"))
+        server.start()
+
+        try {
+            // Pin cert ONLY for 192.168.1.1, NOT for 127.0.0.1
+            val trustStore = TrustStore().apply {
+                pin("192.168.1.1", fp)
+            }
+            val client = HttpFactory.createClient(trustStore)
+            val url = server.url("/").newBuilder().host("127.0.0.1").build()
+
+            try {
+                client.newCall(Request.Builder().url(url).build()).execute()
+                fail("Expected UntrustedCertificateException when connecting to unpinned host 127.0.0.1")
+            } catch (e: Exception) {
+                var foundUntrusted = false
+                fun inspect(t: Throwable?) {
+                    if (t == null || foundUntrusted) return
+                    if (t is UntrustedCertificateException) {
+                        foundUntrusted = true
                         return
                     }
                     inspect(t.cause)
                     for (s in t.suppressed) inspect(s)
                 }
                 inspect(e)
-                assertTrue("Connection to unpinned certificate must be rejected, got $e", rejected)
+                assertTrue("Expected UntrustedCertificateException for unpinned host, got $e", foundUntrusted)
             }
         } finally {
-            server2.shutdown()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun testPinStorePersistenceAndSentinelPinIgnored() {
+        val backing = mutableMapOf<String, String>()
+        val fakePinStore = object : PinStore {
+            override fun loadAll(): Map<String, String> = backing.toMap()
+            override fun save(key: String, fingerprint: String) { backing[key] = fingerprint }
+            override fun remove(key: String) { backing.remove(key) }
+        }
+
+        val store1 = TrustStore(fakePinStore)
+        // Non-TLS sentinel and blank pins must be ignored
+        store1.pin("192.168.1.1", "HTTP_NO_PIN")
+        store1.pin("192.168.1.1", "   ")
+        assertNull(store1.getPinned("192.168.1.1"))
+        assertTrue(backing.isEmpty())
+
+        // Valid pin is persisted and reloaded by a fresh TrustStore instance
+        store1.pin("https://192.168.1.1:443/ubus", testCertificateFingerprint)
+        assertEquals(testCertificateFingerprint, store1.getPinned("192.168.1.1:443"))
+
+        val store2 = TrustStore(fakePinStore)
+        assertEquals(testCertificateFingerprint, store2.getPinned("https://192.168.1.1:443"))
+        assertEquals(testCertificateFingerprint, store2.getPinned("192.168.1.1:443"))
+
+        store2.clearPin("192.168.1.1:443")
+        assertNull(store2.getPinned("192.168.1.1:443"))
+        assertTrue(backing.isEmpty())
+    }
+
+    @Test
+    fun testIpv6KeyParsingAndNullHostHint() {
+        val store = TrustStore()
+        store.pin("https://[fd00::1]:443/ubus", testCertificateFingerprint)
+        assertEquals(testCertificateFingerprint, store.getPinned("[fd00::1]:443"))
+
+        // Portless IPv6 key must match hostOnly lookups from [fd00::1]:443
+        store.clearPin("[fd00::1]:443")
+        store.pin("fd00::1", testCertificateFingerprint)
+        assertEquals(testCertificateFingerprint, store.getPinned("https://[fd00::1]:443/ubus"))
+
+        // checkServerTrusted without hostHint (null) must refuse with UntrustedCertificateException cleanly
+        val stream: InputStream = javaClass.classLoader!!.getResourceAsStream("test_cert.der")!!
+        val cert = CertificateFactory.getInstance("X.509").generateCertificate(stream) as X509Certificate
+        try {
+            store.trustManager.checkServerTrusted(arrayOf(cert), "RSA")
+            fail("Expected UntrustedCertificateException when hostHint is null")
+        } catch (e: UntrustedCertificateException) {
+            assertEquals("unknown", e.host)
+            assertEquals(testCertificateFingerprint, e.presentedFingerprint)
         }
     }
 

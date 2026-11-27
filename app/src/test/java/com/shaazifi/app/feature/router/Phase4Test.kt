@@ -76,8 +76,12 @@ class Phase4Test {
 
         val add = plan(Phase4.addRule(mapOf("name" to "Block telnet", "src" to "lan", "dest" to "wan", "proto" to "tcp", "dest_port" to "23", "target" to "REJECT"), setOf("lan", "wan")))
         assertEquals(UciOp.Add("firewall", "rule", mapOf("name" to "Block telnet", "src" to "lan", "dest" to "wan", "proto" to "tcp", "dest_port" to "23", "target" to "REJECT")), add.ops.single())
+        val multiProto = plan(Phase4.addRule(mapOf("name" to "Web", "src" to "lan", "dest" to "wan", "proto" to "tcp udp", "dest_port" to "8000-8100", "target" to "ACCEPT"), setOf("lan", "wan")))
+        assertEquals(listOf("tcp", "udp"), (multiProto.ops.single() as UciOp.Add).values["proto"])
         assertTrue(err(Phase4.addRule(mapOf("name" to "x", "src" to "nowhere", "target" to "ACCEPT"), setOf("lan", "wan"))).contains("zone", true))
         assertTrue(err(Phase4.addRule(mapOf("name" to "x", "src" to "lan", "proto" to "tcp", "dest_port" to "99999", "target" to "ACCEPT"), setOf("lan", "wan"))).contains("port", true))
+        assertTrue(err(Phase4.addRule(mapOf("name" to "x", "src" to "lan", "proto" to "tcp", "dest_port" to "8100-8000", "target" to "ACCEPT"), setOf("lan", "wan"))).contains("port", true))
+        assertTrue(err(Phase4.addRule(mapOf("name" to "x", "src" to "lan", "proto" to "icmp", "dest_port" to "80", "target" to "ACCEPT"), setOf("lan", "wan"))).contains("port", true))
         assertEquals(listOf<UciOp>(UciOp.Set("firewall", "cfg03", mapOf("enabled" to "0"))), plan(Phase4.ruleEnabled("cfg03", "Allow-Ping", false)).ops)
         assertEquals(listOf<UciOp>(UciOp.Delete("firewall", "cfg03")), plan(Phase4.removeRule("cfg03", "Allow-Ping")).ops)
     }
@@ -90,6 +94,9 @@ class Phase4Test {
         assertTrue(err(Phase4.addRoute("nope", "10.8.0.0/24", "", "", setOf("lan"))).contains("interface", true))
         assertEquals(listOf<UciOp>(UciOp.DeleteWhere("network", "route", mapOf("interface" to "lan", "target" to "10.8.0.0/24"))),
             plan(Phase4.removeRoute("lan", "10.8.0.0/24")).ops)
+        assertEquals(listOf<UciOp>(UciOp.DeleteWhere("network", "route", mapOf("interface" to "lan", "target" to "10.8.0.0/24", "gateway" to "192.168.1.2", "metric" to "10"))),
+            plan(Phase4.removeRoute("lan", "10.8.0.0/24", gateway = "192.168.1.2", metric = "10")).ops)
+        assertTrue(err(Phase4.removeRoute("", "10.8.0.0/24")).isNotEmpty())
         assertEquals(listOf<UciOp>(UciOp.Set("network", "cfg0a", mapOf("disabled" to "1"))), plan(Phase4.routeEnabled("cfg0a", "10.8.0.0/24", false)).ops)
     }
 
@@ -105,6 +112,7 @@ class Phase4Test {
         assertTrue(ok("uci", "add", buildJsonObject { put("config", "network"); put("type", "route"); put("values", obj("interface" to "lan", "target" to "10.8.0.0/24")) }))
         assertFalse(ok("uci", "add", buildJsonObject { put("config", "network"); put("type", "route"); put("values", obj("interface" to "lan", "table" to "main")) }))
         assertTrue(ok("uci", "delete", buildJsonObject { put("config", "network"); put("type", "route"); put("match", obj("interface" to "lan", "target" to "10.8.0.0/24")) }))
+        assertTrue(ok("uci", "delete", buildJsonObject { put("config", "network"); put("type", "route"); put("match", obj("interface" to "lan", "target" to "10.8.0.0/24", "gateway" to "192.168.1.2", "metric" to "10")) }))
         assertTrue(ok("uci", "set", buildJsonObject { put("config", "system"); put("section", "cfg01e48a"); put("values", obj("zonename" to "UTC", "timezone" to "UTC0")) }))
         assertTrue(ok("uci", "set", buildJsonObject { put("config", "firewall"); put("section", "cfg01"); put("values", obj("input" to "ACCEPT", "masq" to "1", "mtu_fix" to "1")) }))
     }

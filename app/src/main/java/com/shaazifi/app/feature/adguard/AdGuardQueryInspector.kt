@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -23,7 +24,9 @@ internal fun AdGuardQueryInspector(
     onClose: () -> Unit,
     onRuleChange: ((AdGuardQueryLogItem) -> Unit)?
 ) {
-    val canChangeRule = onRuleChange != null && AgChanges.domainOrNull(query.questionName) != null
+    val canChangeRule = remember(query.questionName, onRuleChange) {
+        onRuleChange != null && AgChanges.domainOrNull(query.questionName) != null
+    }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("DNS query details") },
@@ -61,7 +64,7 @@ internal fun AdGuardQueryInspector(
         },
         dismissButton = {
             if (canChangeRule) {
-                TextButton(onClick = { onRuleChange(query) }) {
+                TextButton(onClick = { onRuleChange?.invoke(query) }) {
                     Text(if (query.isBlocked) "Allow this site" else "Block this site")
                 }
             }

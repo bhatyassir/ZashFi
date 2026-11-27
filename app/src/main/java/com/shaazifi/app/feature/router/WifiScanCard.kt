@@ -92,15 +92,37 @@ fun WifiScanCard(reader: RouterReader?, onPlan: ((PlanResult) -> String?)?) {
             else SfList {
                 list.forEachIndexed { i, b ->
                     if (i > 0) SfDivider()
+                    val joinable = b.encryption != null && b.ssid.isNotBlank()
+                    val reason = when {
+                        b.ssid.isBlank() -> "Hidden"
+                        b.encryption == null -> "Unsupported"
+                        else -> null
+                    }
                     Row(
-                        Modifier.fillMaxWidth().clickable { chosen = b; password = ""; message = null }.padding(horizontal = 14.dp, vertical = 11.dp),
+                        Modifier
+                            .fillMaxWidth()
+                            .then(if (joinable) Modifier.clickable { chosen = b; password = ""; message = null } else Modifier)
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(b.ssid.ifBlank { "(hidden network)" }, color = c.ink, fontWeight = FontWeight.SemiBold)
-                            Text("${b.security} · channel ${b.channel ?: "?"}", style = SfText.sub, color = c.muted)
+                            Text(
+                                b.ssid.ifBlank { "(hidden network)" },
+                                color = if (joinable) c.ink else c.muted,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                listOfNotNull(
+                                    b.security,
+                                    "channel ${b.channel ?: "?"}",
+                                    if (!joinable) (if (b.ssid.isBlank()) "Cannot join hidden networks" else "Cannot join in app") else null
+                                ).joinToString(" · "),
+                                style = SfText.sub,
+                                color = c.muted
+                            )
                         }
+                        if (reason != null) Pill(reason, tone = PillTone.Off)
                         Text(b.signal?.let { "$it dBm" } ?: "", style = SfText.mono, color = c.muted)
                     }
                 }

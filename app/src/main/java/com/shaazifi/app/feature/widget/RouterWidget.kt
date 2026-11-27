@@ -6,6 +6,9 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.content.res.Configuration
+import android.os.Build
 import android.text.format.DateFormat
 import android.widget.RemoteViews
 import androidx.datastore.core.DataStore
@@ -19,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -125,28 +129,51 @@ class RouterWidget : AppWidgetProvider() {
     }
 
     companion object {
+        const val ACTION_WIDGET = "com.shaazifi.app.ACTION_WIDGET"
+        const val REQUEST_CODE = 200
+
+        fun launchIntent(context: Context): Intent =
+            Intent(context, MainActivity::class.java).apply {
+                action = ACTION_WIDGET
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+
+        private fun formatUpdatedAt(context: Context, updatedAt: Long): String {
+            val date = Date(updatedAt)
+            val dateFmt = DateFormat.getDateFormat(context)
+            val timeFmt = DateFormat.getTimeFormat(context)
+            return "${dateFmt.format(date)} ${timeFmt.format(date)}"
+        }
+
         fun render(context: Context, s: WidgetSnapshot?): RemoteViews {
-            val fmt = DateFormat.getTimeFormat(context)
-            val lines = WidgetText.lines(s, context.getString(R.string.widget_empty)) { fmt.format(Date(it)) }
+            val lines = WidgetText.lines(s, context.getString(R.string.widget_empty)) { formatUpdatedAt(context, it) }
+            val night = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
             return RemoteViews(context.packageName, R.layout.widget_router).apply {
                 setTextViewText(R.id.widget_title, s?.routerName ?: context.getString(R.string.app_name))
                 setTextViewText(R.id.widget_body, lines.joinToString("\n"))
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val bgColor = if (night) 0xFF171F1B.toInt() else 0xFFFBFDFA.toInt()
+                    setColorStateList(R.id.widget_root, "setBackgroundTintList", ColorStateList.valueOf(bgColor))
+                    setTextColor(R.id.widget_title, if (night) 0xFFEDF4EC.toInt() else 0xFF17271E.toInt())
+                    setTextColor(R.id.widget_body, if (night) 0xFFC8D5CC.toInt() else 0xFF354A3E.toInt())
+                }
                 setOnClickPendingIntent(
                     R.id.widget_root,
                     PendingIntent.getActivity(
-                        context, 0,
-                        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-                        PendingIntent.FLAG_IMMUTABLE
+                        context,
+                        REQUEST_CODE,
+                        launchIntent(context),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                     )
                 )
             }
         }
 
-        /** Re-draws every placed widget from the stored snapshot. */
-        suspend fun refreshAll(context: Context) {
-            val manager = AppWidgetManager.getInstance(context) ?: return
+        /** Re-draws every placed widget from the stored snapshot off the Main thread. */
+        suspend fun refreshAll(context: Context) = withContext(Dispatchers.IO) {
+            val manager = AppWidgetManager.getInstance(context) ?: return@withContext
             val ids = manager.getAppWidgetIds(ComponentName(context, RouterWidget::class.java))
-            if (ids.isEmpty()) return
+            if (ids.isEmpty()) return@withContext
             val store = (context.applicationContext as ShaaziFiApp).container.widgetStore
             val views = render(context, runCatching { store.read() }.getOrNull())
             ids.forEach { manager.updateAppWidget(it, views) }

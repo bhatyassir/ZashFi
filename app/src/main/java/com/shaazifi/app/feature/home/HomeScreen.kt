@@ -1,34 +1,11 @@
 package com.shaazifi.app.feature.home
 
-import androidx.compose.runtime.mutableIntStateOf
-import com.shaazifi.app.feature.devices.Device
-import com.shaazifi.app.feature.devices.matchDeviceRate
-import com.shaazifi.app.feature.router.FeatureView
-import com.shaazifi.app.feature.router.RealtimeStats
-import com.shaazifi.app.ui.components.HistoryRange
-import com.shaazifi.app.ui.components.MetricTile
-import com.shaazifi.app.ui.components.PageHeading
-import com.shaazifi.app.ui.components.PageLink
-import com.shaazifi.app.ui.components.SectionTitle
-import com.shaazifi.app.ui.components.SfCard
-import com.shaazifi.app.ui.components.SfDivider
-import com.shaazifi.app.ui.components.SfListRow
-import com.shaazifi.app.ui.components.TrafficReading
-import com.shaazifi.app.ui.components.WifiNetworkCard
-import com.shaazifi.app.ui.icons.SfIcons
-import com.shaazifi.app.ui.theme.PillTone
-import com.shaazifi.app.ui.theme.SfText
-import com.shaazifi.app.ui.theme.SfColors
-import com.shaazifi.app.ui.theme.SfTheme
-import androidx.compose.foundation.Canvas
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.runtime.remember
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,14 +21,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -66,6 +50,28 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.shaazifi.app.feature.devices.Device
+import com.shaazifi.app.feature.devices.matchDeviceRate
+import com.shaazifi.app.feature.router.FeatureView
+import com.shaazifi.app.feature.router.RealtimeStats
+import com.shaazifi.app.ui.components.HistoryRange
+import com.shaazifi.app.ui.components.HueTile
+import com.shaazifi.app.ui.components.MetricTile
+import com.shaazifi.app.ui.components.PageHeading
+import com.shaazifi.app.ui.components.PageLink
+import com.shaazifi.app.ui.components.Pill
+import com.shaazifi.app.ui.components.SectionTitle
+import com.shaazifi.app.ui.components.SfCard
+import com.shaazifi.app.ui.components.SfDivider
+import com.shaazifi.app.ui.components.SfListRow
+import com.shaazifi.app.ui.components.TrafficReading
+import com.shaazifi.app.ui.icons.SfIcons
+import com.shaazifi.app.ui.theme.PillTone
+import com.shaazifi.app.ui.theme.SfColors
+import com.shaazifi.app.ui.theme.SfHue
+import com.shaazifi.app.ui.theme.SfText
+import com.shaazifi.app.ui.theme.SfTheme
+import java.util.Locale
 
 /** Colours taken from docs/design/router-app-mock.html. */
 private enum class NodeIcon { INTERNET, ROUTER, DEVICES }
@@ -212,9 +218,12 @@ private fun DashboardView(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PageHeading("Network overview", "${d.routerName} · $routerHost",
+        PageHeading(
+            "Network overview",
+            "${d.routerName} · $routerHost",
             if (d.stale) "Last known status" else if (d.internetUp) "Internet online" else "Internet offline",
-            if (d.stale) PillTone.Warn else if (d.internetUp) PillTone.Ok else PillTone.Off)
+            if (d.stale) PillTone.Warn else if (d.internetUp) PillTone.Ok else PillTone.Off
+        )
         if (d.stale) Banner("Showing the last values. The router did not answer.", palette.warnSoft, palette.warn)
 
         SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 12.dp) {
@@ -227,21 +236,34 @@ private fun DashboardView(
                 Box(Modifier.weight(1f)) { TrafficReading("↑ Upload", graphRate(d.uploadBps), palette.warn) }
             }
             if (d.downloadHistoryBps.size >= 2 && d.downloadBps != null && d.uploadBps != null) {
-                TrafficGraph(d.historyTimesMs, d.downloadHistoryBps, d.uploadHistoryBps, palette,
-                    windowMs = minutes * 60_000L, modifier = Modifier.fillMaxWidth().height(133.dp)
-                        .semantics { contentDescription = "Download and upload history over $minutes minutes" })
+                TrafficGraph(
+                    d.historyTimesMs,
+                    d.downloadHistoryBps,
+                    d.uploadHistoryBps,
+                    palette,
+                    windowMs = minutes * 60_000L,
+                    modifier = Modifier.fillMaxWidth().height(133.dp)
+                        .semantics { contentDescription = "Download and upload history over $minutes minutes" }
+                )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(if (minutes == 1) "60 sec ago" else "5 min ago", style = SfText.mono, color = palette.muted)
                     Text("Now", style = SfText.mono, color = palette.muted)
                 }
             } else {
-                Text(if (d.downloadBps == null && d.downloadHistoryBps.isNotEmpty()) "Traffic data unavailable" else "Collecting traffic history…",
-                    color = palette.muted, style = SfText.sub)
+                Text(
+                    if (d.downloadBps == null && d.downloadHistoryBps.isNotEmpty()) "Traffic data unavailable" else "Collecting traffic history…",
+                    color = palette.muted,
+                    style = SfText.sub
+                )
             }
             SfDivider()
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(d.totalBytesSinceStart?.let { "${HomeParsers.formatBytes(it)} since router start" }.orEmpty(),
-                    color = palette.muted, style = SfText.sub, modifier = Modifier.weight(1f))
+                Text(
+                    d.totalBytesSinceStart?.let { "${HomeParsers.formatBytes(it)} since router start" }.orEmpty(),
+                    color = palette.muted,
+                    style = SfText.sub,
+                    modifier = Modifier.weight(1f)
+                )
                 PageLink("Who is using it?", { actions.openFeature("bandwidth") })
             }
         }
@@ -251,7 +273,7 @@ private fun DashboardView(
             d.radios.chunked(2).forEach { pair ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     pair.forEach { r ->
-                        WifiNetworkCard(r.ssid, r.band, r.channel, r.up, r.clients, Modifier.weight(1f)) { actions.openWifi(r.key) }
+                        HomeWifiCard(r.ssid, r.band, r.channel, r.up, r.clients, Modifier.weight(1f)) { actions.openWifi(r.key) }
                     }
                     if (pair.size == 1) Spacer(Modifier.weight(1f))
                 }
@@ -267,6 +289,9 @@ private fun DashboardView(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile("CPU", d.cpuUsedPct?.let { "$it%" } ?: "—", Modifier.weight(1f), percent = d.cpuUsedPct)
                 MetricTile("Memory", "${d.memUsedPct}%", Modifier.weight(1f), percent = d.memUsedPct, blue = true)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TempMetricTile(d.primaryTempC, palette, Modifier.weight(1f))
                 MetricTile("Uptime", d.uptimeText, Modifier.weight(1f))
             }
         }
@@ -282,9 +307,13 @@ private fun DashboardView(
                 .take(3)
             if (ranked.isEmpty()) Text("No connected devices to show.", style = SfText.sub, color = palette.muted)
             ranked.forEach { (device, rate) ->
-                SfListRow(device.name, subtitle = device.connection.label, icon = SfIcons.Devices,
+                SfListRow(
+                    device.name,
+                    subtitle = device.connection.label,
+                    icon = SfIcons.Devices,
                     trailing = { if (rate != null) Text(RealtimeStats.rateText(rate), style = SfText.mono, color = palette.muted) },
-                    onClick = { actions.openDevice(device.mac) })
+                    onClick = { actions.openDevice(device.mac) }
+                )
             }
         }
     }
@@ -295,64 +324,152 @@ private fun graphRate(bitsPerSecond: Double?): String =
 
 /** The chart shows the line this far behind "now", so a new point is always ready before it shows. */
 private const val GRAPH_DELAY_MS = 2_000L
+private const val GRAPH_FRAME_STEP_MS = 33L
+
+private data class TempTileStyle(val bg: Color, val border: Color, val valueColor: Color, val note: String?)
+
+@Composable
+private fun TempMetricTile(tempCelsius: Double?, palette: SfColors, modifier: Modifier = Modifier) {
+    val style = when {
+        tempCelsius == null -> TempTileStyle(palette.sunk, palette.line, palette.ink, null)
+        tempCelsius >= 85.0 -> TempTileStyle(palette.badSoft, palette.bad, palette.bad, "Hot")
+        tempCelsius >= 75.0 -> TempTileStyle(palette.warnSoft, palette.warn, palette.warn, "Warm")
+        else -> TempTileStyle(palette.sunk, palette.line, palette.ink, null)
+    }
+    val valueText = tempCelsius?.let { String.format(Locale.US, "%.1f°C", it) } ?: "—"
+    val shape = RoundedCornerShape(11.dp)
+    Column(
+        modifier.clip(shape).background(style.bg).border(1.dp, style.border, shape).padding(11.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text("Temp", color = palette.muted, style = MaterialTheme.typography.bodySmall)
+        Text(valueText, color = style.valueColor, style = MaterialTheme.typography.titleLarge)
+        if (style.note != null) {
+            Text(style.note, color = style.valueColor, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun HomeWifiCard(
+    name: String,
+    band: String,
+    channel: String,
+    enabled: Boolean,
+    clients: Int?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val c = SfTheme.colors
+    val hue = when (band) {
+        "6 GHz", "60 GHz" -> SfHue.VIOLET
+        "5 GHz" -> SfHue.BLUE
+        else -> SfHue.GREEN
+    }
+    val shape = RoundedCornerShape(13.dp)
+    Column(
+        modifier.clip(shape).background(c.sunk).border(1.dp, c.line, shape)
+            .clickable(onClickLabel = "View $name", onClick = onClick).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            HueTile(SfIcons.Wifi, hue, size = 35.dp)
+            Pill(if (enabled) "On" else "Off", if (enabled) PillTone.Ok else PillTone.Off)
+        }
+        Text(name, style = MaterialTheme.typography.titleMedium, color = c.ink)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                listOf(band, channel.takeIf { it.isNotBlank() }?.let { "Ch $it" }.orEmpty())
+                    .filter { it.isNotBlank() }.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = c.muted,
+                modifier = Modifier.weight(1f)
+            )
+            if (clients != null) {
+                Text(
+                    if (clients == 1) "1 device" else "$clients devices",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.muted
+                )
+            }
+        }
+        Text("View network ›", style = MaterialTheme.typography.bodySmall, color = c.accent, fontWeight = FontWeight.SemiBold)
+    }
+}
 
 /**
  * Download (filled) and upload (line) on one scale. Owner feedback: smooth, real time, and no
- * jump back each second. Points sit at the time they were measured; the chart moves with the
- * phone's clock on every screen frame, so it glides at one steady speed whenever a reading lands.
+ * jump back each second. Points sit at the time they were measured; the chart scrolls smoothly
+ * in the draw phase at ~30 fps with cached [Path] instances so no per-frame allocations occur.
  */
 @Composable
 private fun TrafficGraph(times: List<Long>, down: List<Double>, up: List<Double>, palette: SfColors, windowMs: Long, modifier: Modifier = Modifier) {
-    var clock by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val clock = remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
+        var lastFrameMs = 0L
         while (true) {
-            withFrameMillis { }
-            clock = System.currentTimeMillis()
+            withFrameMillis { frameMs ->
+                if (frameMs - lastFrameMs >= GRAPH_FRAME_STEP_MS) {
+                    lastFrameMs = frameMs
+                    clock.longValue = System.currentTimeMillis()
+                }
+            }
         }
     }
-    val first = times.indexOfFirst { it >= (times.lastOrNull() ?: 0L) - windowMs }.coerceAtLeast(0)
-    val target = ((down.drop(first) + up.drop(first)).maxOrNull() ?: 0.0).coerceAtLeast(1.0).toFloat() * 1.15f
+    val target = remember(times, down, up, windowMs) {
+        val cutoff = (times.lastOrNull() ?: 0L) - windowMs
+        val first = times.indexOfFirst { it >= cutoff }.coerceAtLeast(0)
+        var peak = 1.0
+        for (i in first until down.size) if (down[i] > peak) peak = down[i]
+        for (i in first until up.size) if (up[i] > peak) peak = up[i]
+        peak.toFloat() * 1.15f
+    }
     val max by animateFloatAsState(target, animationSpec = tween(800), label = "graph-scale")
+    val downLine = remember { Path() }
+    val downArea = remember { Path() }
+    val upLine = remember { Path() }
     Canvas(modifier = modifier.clipToBounds()) {
         val n = minOf(times.size, down.size)
         if (n < 2) return@Canvas
         val w = size.width
         val h = size.height
-        val shownNow = clock - GRAPH_DELAY_MS
+        val shownNow = clock.longValue - GRAPH_DELAY_MS
         fun x(t: Long): Float = w - (shownNow - t).toFloat() / windowMs * w
         fun y(v: Double): Float = h - 2f - (h - 6f) * (v.toFloat() / max).coerceIn(0f, 1f)
 
         drawLine(palette.line, Offset(0f, h / 3f), Offset(w, h / 3f), 1f)
         drawLine(palette.line, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), 1f)
 
-        fun smooth(values: List<Double>): Path {
-            val p = Path()
-            val m = minOf(values.size, n)
-            for (i in 0 until m) {
+        fun populateSmooth(path: Path, values: List<Double>, count: Int) {
+            path.reset()
+            for (i in 0 until count) {
                 val px = x(times[i])
                 val py = y(values[i])
                 if (i == 0) {
-                    p.moveTo(px, py)
+                    path.moveTo(px, py)
                 } else {
                     val qx = x(times[i - 1])
                     val qy = y(values[i - 1])
                     val mx = (qx + px) / 2f
-                    p.cubicTo(mx, qy, mx, py, px, py)
+                    path.cubicTo(mx, qy, mx, py, px, py)
                 }
             }
-            return p
         }
 
-        val line = smooth(down)
-        val area = Path().apply {
-            addPath(line)
-            lineTo(x(times[n - 1]), h)
-            lineTo(x(times[0]), h)
-            close()
+        populateSmooth(downLine, down, n)
+        downArea.reset()
+        downArea.addPath(downLine)
+        downArea.lineTo(x(times[n - 1]), h)
+        downArea.lineTo(x(times[0]), h)
+        downArea.close()
+
+        drawPath(downArea, palette.accentSoft)
+        drawPath(downLine, palette.accent, style = Stroke(width = 4f, cap = StrokeCap.Round))
+        val upCount = minOf(times.size, up.size)
+        if (upCount >= 2) {
+            populateSmooth(upLine, up, upCount)
+            drawPath(upLine, palette.warn, style = Stroke(width = 3f, cap = StrokeCap.Round))
         }
-        drawPath(area, palette.accentSoft)
-        drawPath(line, palette.accent, style = Stroke(width = 4f, cap = StrokeCap.Round))
-        if (up.size >= 2) drawPath(smooth(up), palette.warn, style = Stroke(width = 3f, cap = StrokeCap.Round))
     }
 }
 

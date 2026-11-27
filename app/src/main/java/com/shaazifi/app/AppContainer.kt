@@ -5,8 +5,10 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStore
 import com.shaazifi.app.core.adguard.AdGuardClient
+import com.shaazifi.app.core.net.DataStorePinStore
 import com.shaazifi.app.core.net.HttpFactory
 import com.shaazifi.app.core.net.TrustStore
+import com.shaazifi.app.core.net.WifiBinder
 import android.os.SystemClock
 import com.shaazifi.app.core.session.AppLock
 import com.shaazifi.app.core.session.DataStoreSecretBox
@@ -32,13 +34,16 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class AppContainer(private val context: Context) {
 
     val trustStore: TrustStore by lazy {
-        TrustStore().apply {
+        TrustStore(DataStorePinStore(dataStore)).apply {
             DebugRouterConfig.seedDebugPins(this)
         }
     }
 
     val okHttpClient: OkHttpClient by lazy {
-        HttpFactory.createClient(trustStore)
+        HttpFactory.createClient(
+            trustStore = trustStore,
+            socketFactory = WifiBinder.socketFactory(context)
+        )
     }
 
     val dataStore: DataStore<Preferences> by lazy {
@@ -83,10 +88,19 @@ class AppContainer(private val context: Context) {
             profileRepository = profileRepository,
             trustStore = trustStore,
             clearWebStorage = { WebStorageManager.clearAll() },
-            forgetSecrets = {
-                secretStore.forget(it)
-                widgetStore.clearIf(context, it)
-                deviceCache.forget(it)
+            forgetSecrets = { profileId ->
+                secretStore.forget(profileId)
+                backgroundSecrets.forget(profileId)
+                val saved = savedSessions.last()
+                if (saved?.profileId == profileId) {
+                    savedSessions.clear(saved)
+                }
+                if (alertSettings.profileId() == profileId) {
+                    runCatching { com.shaazifi.app.feature.alerts.AlertScheduler.stop(context) }
+                    alertSettings.disable()
+                }
+                widgetStore.clearIf(context, profileId)
+                deviceCache.forget(profileId)
             }
         )
     }

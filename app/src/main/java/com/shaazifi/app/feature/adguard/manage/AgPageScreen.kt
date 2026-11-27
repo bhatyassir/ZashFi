@@ -1,5 +1,6 @@
 package com.shaazifi.app.feature.adguard.manage
 
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
@@ -12,9 +13,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -30,6 +31,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +56,54 @@ import com.shaazifi.app.ui.theme.SfText
 import com.shaazifi.app.ui.theme.SfTheme
 import kotlinx.coroutines.launch
 
+/** Bulk DNS rewrites: paste a `domain answer` list, or copy the current list to the clipboard. */
+@Composable
+fun RewriteBulkCard(holder: AgPageHolder) {
+    val c = SfTheme.colors
+    val scope = rememberCoroutineScope()
+    var text by rememberSaveable { mutableStateOf("") }
+    var status by remember { mutableStateOf<String?>(null) }
+    var confirmImport by remember { mutableStateOf(false) }
+    if (confirmImport) AlertDialog(
+        onDismissRequest = { confirmImport = false },
+        title = { Text("Import DNS rewrites?") },
+        text = { Text("Add the new rows and remove the ones you deleted from the list. AdGuard Home applies the change at once.") },
+        confirmButton = {
+            TextButton(onClick = {
+                confirmImport = false
+                scope.launch { status = holder.importRewrites(text) }
+            }) { Text("Import") }
+        },
+        dismissButton = { TextButton(onClick = { confirmImport = false }) { Text("Cancel") } }
+    )
+    SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 8.dp) {
+        Text("Import or export rewrites", style = MaterialTheme.typography.titleMedium, color = c.ink)
+        Text("One “domain answer” per line. Lines starting with # are ignored.", style = SfText.sub, color = c.muted)
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            label = { Text("Rewrites") },
+            minLines = 3,
+            maxLines = 8,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PrimaryButton("Import", enabled = text.isNotBlank(), onClick = { confirmImport = true })
+            GhostButton("Export here", onClick = {
+                scope.launch {
+                    status = try {
+                        text = holder.exportRewrites()
+                        "Loaded ${text.lineSequence().count { it.isNotBlank() }} rewrite(s)."
+                    } catch (e: Exception) {
+                        "Could not export rewrites (${e::class.simpleName})."
+                    }
+                }
+            })
+        }
+        status?.let { Text(it, style = SfText.sub, color = c.muted) }
+    }
+}
+
 /** One AdGuard Home management page: rows, folded forms, actions, and the confirmation dialog. */
 @Composable
 fun AgPageScreen(holder: AgPageHolder, page: AgPage, onSignIn: () -> Unit) {
@@ -63,118 +113,212 @@ fun AgPageScreen(holder: AgPageHolder, page: AgPage, onSignIn: () -> Unit) {
     val pending by holder.pending.collectAsState()
     val message by holder.message.collectAsState()
     val busy by holder.busy.collectAsState()
+    var serviceSearch by rememberSaveable(page) { mutableStateOf("") }
     LaunchedEffect(holder) { holder.refresh() }
-    val request: (AgAction) -> Unit = { a -> scope.launch { holder.request(a) } }
+    val request = remember(holder, scope, busy) {
+        { a: AgAction -> if (!busy) scope.launch { holder.request(a) } }
+    }
 
     pending?.let { a ->
         AlertDialog(
-            onDismissRequest = { holder.dismiss() },
+            onDismissRequest = { if (!busy) holder.dismiss() },
             title = { Text(a.title, fontWeight = FontWeight.Bold) },
             text = { if (a.message.isNotBlank()) Text(a.message) },
-            confirmButton = { TextButton(onClick = { scope.launch { holder.confirm() } }) { Text(if (a.destructive) "Yes, ${a.label.lowercase()}" else a.label, color = if (a.destructive) c.bad else c.accent) } },
-            dismissButton = { TextButton(onClick = { holder.dismiss() }) { Text("Cancel") } }
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = { scope.launch { holder.confirm() } }
+                ) {
+                    Text(
+                        if (a.destructive) "Yes, ${a.label.lowercase()}" else a.label,
+                        color = if (a.destructive) c.bad else c.accent
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { holder.dismiss() }) { Text("Cancel") }
+            }
         )
     }
 
-    Column(
-        Modifier.fillMaxSize().background(c.bg).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+    val (heroFg, heroBg) = com.shaazifi.app.ui.theme.SfHue.VIOLET.colors()
+    val (barFg, _) = com.shaazifi.app.ui.theme.SfHue.VIOLET.colors()
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(c.bg),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Owner feedback 2026-11-18: same coloured header as every other page.
-        val (heroFg, heroBg) = com.shaazifi.app.ui.theme.SfHue.VIOLET.colors()
-        Column(
-            Modifier.fillMaxWidth().clip(androidx.compose.foundation.shape.RoundedCornerShape(20.dp)).background(heroBg).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.size(46.dp).clip(androidx.compose.foundation.shape.CircleShape).background(c.surface), contentAlignment = Alignment.Center) {
-                    Icon(SfIcons.Shield, contentDescription = null, tint = heroFg, modifier = Modifier.size(24.dp))
+        item(key = "header") {
+            // Owner feedback 2026-11-18: same coloured header as every other page.
+            Column(
+                Modifier.fillMaxWidth().clip(androidx.compose.foundation.shape.RoundedCornerShape(20.dp)).background(heroBg).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box(Modifier.size(46.dp).clip(androidx.compose.foundation.shape.CircleShape).background(c.surface), contentAlignment = Alignment.Center) {
+                        Icon(SfIcons.Shield, contentDescription = null, tint = heroFg, modifier = Modifier.size(24.dp))
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text(page.title, style = MaterialTheme.typography.titleLarge, color = c.ink, fontWeight = FontWeight.Bold)
+                        Text("AdGuard Home", color = heroFg, fontWeight = FontWeight.SemiBold, style = SfText.sub)
+                    }
+                    TextButton(
+                        enabled = !busy,
+                        onClick = { scope.launch { holder.refresh() } }
+                    ) {
+                        Text("Refresh", color = if (busy) c.muted else heroFg)
+                    }
                 }
-                Column(Modifier.weight(1f)) {
-                    Text(page.title, style = MaterialTheme.typography.titleLarge, color = c.ink, fontWeight = FontWeight.Bold)
-                    Text("AdGuard Home", color = heroFg, fontWeight = FontWeight.SemiBold, style = SfText.sub)
+                (state as? AgState.Loaded)?.view?.summary?.let { Text(it, style = SfText.sub, color = c.ink) }
+                val pill = (state as? AgState.Loaded)?.view?.pill
+                if (holder.demo || pill != null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pill?.let { Pill(it.text, tone = it.tone) }
+                    if (holder.demo) Pill("Demo", tone = PillTone.Off)
                 }
-            }
-            (state as? AgState.Loaded)?.view?.summary?.let { Text(it, style = SfText.sub, color = c.ink) }
-            val pill = (state as? AgState.Loaded)?.view?.pill
-            if (holder.demo || pill != null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                pill?.let { Pill(it.text, tone = it.tone) }
-                if (holder.demo) Pill("Demo", tone = PillTone.Off)
             }
         }
-        if (busy) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.accent); Text("Working...", style = SfText.sub, color = c.muted)
+        if (page == AgPage.REWRITES && !holder.demo) {
+            item(key = "rewrite-bulk") {
+                RewriteBulkCard(holder)
+            }
+        }
+        if (busy) {
+            item(key = "busy") {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.accent)
+                    Text("Working...", style = SfText.sub, color = c.muted)
+                }
+            }
         }
         message?.let { m ->
-            SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 6.dp) {
-                Text(m, style = SfText.mono, color = c.ink)
-                TextButton(onClick = { holder.clearMessage() }) { Text("OK") }
+            item(key = "message") {
+                SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 6.dp) {
+                    Text(m, style = SfText.mono, color = c.ink)
+                    TextButton(onClick = { holder.clearMessage() }) { Text("OK") }
+                }
             }
         }
         when (val s = state) {
-            AgState.Loading -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = c.accent) }
-            is AgState.Failed -> SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 10.dp) {
-                Text(s.message, style = SfText.sub, color = c.muted)
-                if (s.needsPassword) PrimaryButton("Go to AdGuard sign in", onClick = onSignIn)
-                GhostButton("Try again", onClick = { scope.launch { holder.refresh() } })
+            AgState.Loading -> {
+                item(key = "loading") {
+                    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = c.accent)
+                    }
+                }
             }
-            is AgState.Loaded -> AgViewContent(s.view, request)
+            is AgState.Failed -> {
+                item(key = "failed") {
+                    SfCard(modifier = Modifier.fillMaxWidth(), verticalSpacing = 10.dp) {
+                        Text(s.message, style = SfText.sub, color = c.muted)
+                        if (s.needsPassword) PrimaryButton("Go to AdGuard sign in", onClick = onSignIn)
+                        GhostButton("Try again", enabled = !busy, onClick = { scope.launch { holder.refresh() } })
+                    }
+                }
+            }
+            is AgState.Loaded -> {
+                val view = s.view
+                if (page == AgPage.SERVICES) {
+                    item(key = "service_search") {
+                        OutlinedTextField(
+                            value = serviceSearch,
+                            onValueChange = { serviceSearch = it },
+                            label = { Text("Find a service") },
+                            singleLine = true,
+                            enabled = !busy,
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+                val term = if (page == AgPage.SERVICES) serviceSearch.trim() else ""
+                view.sections.forEachIndexed { secIdx, section ->
+                    val rows = if (term.isEmpty()) {
+                        section.rows
+                    } else {
+                        section.rows.filter {
+                            it.label.contains(term, ignoreCase = true) ||
+                                it.sub?.contains(term, ignoreCase = true) == true
+                        }
+                    }
+                    item(key = "sec_${secIdx}_header") {
+                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(Modifier.size(width = 4.dp, height = 16.dp).clip(androidx.compose.foundation.shape.CircleShape).background(barFg))
+                            Eyebrow(section.heading)
+                        }
+                    }
+                    if (rows.isEmpty()) {
+                        item(key = "sec_${secIdx}_empty") {
+                            Note(
+                                if (term.isNotEmpty()) "No matching services."
+                                else section.emptyText ?: "Nothing here."
+                            )
+                        }
+                    } else {
+                        itemsIndexed(
+                            items = rows,
+                            key = { rowIdx, r -> "sec_${secIdx}_row_${rowIdx}_${r.label}" },
+                            contentType = { _, _ -> "ag_row" }
+                        ) { _, r ->
+                            SfCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
+                                AgRowView(r, enabled = !busy, request = request)
+                            }
+                        }
+                    }
+                }
+                if (view.forms.isNotEmpty() || view.actions.isNotEmpty()) {
+                    item(key = "changes_header") {
+                        Eyebrow("Changes", modifier = Modifier.padding(top = 8.dp))
+                    }
+                    item(key = "changes_list") {
+                        SfList {
+                            var first = true
+                            view.forms.forEach { f ->
+                                if (!first) SfDivider(); first = false
+                                AgFormView(f, enabled = !busy, request = request)
+                            }
+                            view.actions.forEach { a ->
+                                if (!first) SfDivider(); first = false
+                                Row(
+                                    Modifier.fillMaxWidth()
+                                        .clickable(enabled = !busy) { request(a) }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    com.shaazifi.app.ui.components.HueTile(
+                                        if (a.destructive) SfIcons.Ban else SfIcons.Bolt,
+                                        if (a.destructive) com.shaazifi.app.ui.theme.SfHue.RED else com.shaazifi.app.ui.theme.SfHue.ORANGE,
+                                        size = 34.dp
+                                    )
+                                    Text(
+                                        a.label,
+                                        color = if (!busy) (if (a.destructive) c.bad else c.ink) else c.muted,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                view.note?.let { note ->
+                    item(key = "view_note") { Note(note) }
+                }
+                item(key = "confirm_note") {
+                    Note("Every change is shown to you first. AdGuard Home applies it at once; there is no automatic undo.")
+                }
+            }
         }
-        Box(Modifier.padding(bottom = 12.dp))
+        item(key = "bottom_spacer") { Spacer(Modifier.padding(bottom = 12.dp)) }
     }
 }
 
 @Composable
-private fun AgViewContent(view: AgView, request: (AgAction) -> Unit) {
-    val c = SfTheme.colors
-    val (barFg, _) = com.shaazifi.app.ui.theme.SfHue.VIOLET.colors()
-    view.sections.forEach { section ->
-        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.size(width = 4.dp, height = 16.dp).clip(androidx.compose.foundation.shape.CircleShape).background(barFg))
-            Eyebrow(section.heading)
-        }
-        if (section.rows.isEmpty()) {
-            Note(section.emptyText ?: "Nothing here.")
-        } else {
-            SfList {
-                section.rows.forEachIndexed { i, r ->
-                    if (i > 0) SfDivider()
-                    AgRowView(r, request)
-                }
-            }
-        }
-    }
-    if (view.forms.isNotEmpty() || view.actions.isNotEmpty()) {
-        Eyebrow("Changes", modifier = Modifier.padding(top = 8.dp))
-        SfList {
-            var first = true
-            view.forms.forEach { f ->
-                if (!first) SfDivider(); first = false
-                AgFormView(f, request)
-            }
-            view.actions.forEach { a ->
-                if (!first) SfDivider(); first = false
-                Row(
-                    Modifier.fillMaxWidth().clickable { request(a) }.padding(horizontal = 14.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    com.shaazifi.app.ui.components.HueTile(if (a.destructive) SfIcons.Ban else SfIcons.Bolt, if (a.destructive) com.shaazifi.app.ui.theme.SfHue.RED else com.shaazifi.app.ui.theme.SfHue.ORANGE, size = 34.dp)
-                    Text(a.label, color = if (a.destructive) c.bad else c.ink, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                }
-            }
-        }
-    }
-    view.note?.let { Note(it) }
-    Note("Every change is shown to you first. AdGuard Home applies it at once; there is no automatic undo.")
-}
-
-@Composable
-private fun AgRowView(r: AgRow, request: (AgAction) -> Unit) {
+private fun AgRowView(r: AgRow, enabled: Boolean, request: (AgAction) -> Unit) {
     val c = SfTheme.colors
     Row(
         Modifier.fillMaxWidth()
-            .then(if (r.onToggle != null) Modifier.clickable { request(r.onToggle) } else Modifier)
+            .then(if (r.onToggle != null) Modifier.clickable(enabled = enabled) { request(r.onToggle) } else Modifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -198,19 +342,19 @@ private fun AgRowView(r: AgRow, request: (AgAction) -> Unit) {
             Text(r.value, style = if (r.mono) SfText.mono else SfText.sub, color = c.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         }
         r.pill?.let { Pill(it.text, tone = it.tone) }
-        r.extra?.let { e -> Pill(e.label, tone = PillTone.Bad, onClick = { request(e) }) }
-        if (r.toggle != null) SfSwitch(checked = r.toggle, enabled = r.onToggle != null)
+        r.extra?.let { e -> Pill(e.label, tone = PillTone.Bad, onClick = if (enabled) ({ request(e) }) else null) }
+        if (r.toggle != null) SfSwitch(checked = r.toggle, enabled = enabled && r.onToggle != null)
     }
 }
 
 @Composable
-private fun AgFormView(form: AgForm, request: (AgAction) -> Unit) {
+private fun AgFormView(form: AgForm, enabled: Boolean, request: (AgAction) -> Unit) {
     val c = SfTheme.colors
     var open by remember(form.title) { mutableStateOf(false) }
     var error by remember(form.title) { mutableStateOf<String?>(null) }
     val values = remember(form.title) { mutableStateMapOf<String, String>().apply { form.fields.forEach { put(it.key, it.initial) } } }
     Row(
-        Modifier.fillMaxWidth().clickable { open = !open; error = null }.padding(horizontal = 14.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().clickable(enabled = enabled) { open = !open; error = null }.padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         com.shaazifi.app.ui.components.HueTile(SfIcons.Pencil, com.shaazifi.app.ui.theme.SfHue.BLUE, size = 34.dp)
@@ -221,24 +365,30 @@ private fun AgFormView(form: AgForm, request: (AgAction) -> Unit) {
     if (!open) return
     Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         form.fields.forEach { f ->
-            f.pick?.let { kind -> com.shaazifi.app.feature.router.DevicePicker(kind, values[f.key].orEmpty()) { values[f.key] = it; error = null } }
-            if (f.choices.isNotEmpty()) com.shaazifi.app.feature.router.ChoiceChips(f.choices, f.multi, values[f.key].orEmpty()) { values[f.key] = it; error = null }
+            f.pick?.let { kind -> com.shaazifi.app.feature.router.DevicePicker(kind, values[f.key].orEmpty()) { if (enabled) { values[f.key] = it; error = null } } }
+            if (f.choices.isNotEmpty()) com.shaazifi.app.feature.router.ChoiceChips(f.choices, f.multi, values[f.key].orEmpty()) { if (enabled) { values[f.key] = it; error = null } }
             OutlinedTextField(
                 value = values[f.key].orEmpty(),
                 onValueChange = { values[f.key] = it; error = null },
                 label = { Text(f.label) },
                 placeholder = f.hint?.let { h -> { Text(h) } },
                 singleLine = true,
+                enabled = enabled,
                 keyboardOptions = if (f.numeric) KeyboardOptions(keyboardType = KeyboardType.Number) else KeyboardOptions(keyboardType = KeyboardType.Uri),
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth()
             )
         }
         error?.let { Text(it, style = SfText.sub, color = c.bad) }
-        PrimaryButton(form.submitLabel, onClick = {
+        PrimaryButton(form.submitLabel, enabled = enabled, onClick = {
             when (val b = form.build(values.toMap())) {
                 is AgBuild.Invalid -> error = b.message
-                is AgBuild.Ready -> { error = null; request(b.action) }
+                is AgBuild.Ready -> {
+                    error = null
+                    form.fields.forEach { f -> values[f.key] = f.initial }
+                    open = false
+                    request(b.action)
+                }
             }
         })
     }

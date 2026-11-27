@@ -1,5 +1,7 @@
 package com.shaazifi.app.feature.home
 
+import com.shaazifi.app.feature.router.ThermalSensor
+
 /** Router identity, from `system board`. */
 data class BoardInfo(
     val model: String,
@@ -59,7 +61,8 @@ data class HomeReading(
     val notices: Set<HomeNotice> = emptySet(),
     /** Owner feedback: network links (lan, wan, VPN...) and whether each is up. */
     val interfaces: List<Pair<String, Boolean>> = emptyList(),
-    val radios: List<RadioSummary> = emptyList()
+    val radios: List<RadioSummary> = emptyList(),
+    val thermals: List<ThermalSensor> = emptyList()
 )
 
 /** One Wi-Fi network for the Home cards (like LuCI Mobile's dashboard). */
@@ -113,7 +116,9 @@ data class HomeDashboard(
     /** True when the last refresh failed and these are the last good values. */
     val stale: Boolean,
     val interfaces: List<Pair<String, Boolean>> = emptyList(),
-    val radios: List<RadioSummary> = emptyList()
+    val radios: List<RadioSummary> = emptyList(),
+    val thermals: List<ThermalSensor> = emptyList(),
+    val primaryTempC: Double? = thermals.maxOfOrNull { it.tempCelsius }
 )
 
 sealed interface HomeUiState {
